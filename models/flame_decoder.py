@@ -11,6 +11,17 @@ import numpy as np
 import torch
 
 
+class _ChumbyStub:
+    pass
+
+
+class _FlameUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if "chumpy" in module:
+            return _ChumbyStub
+        return super().find_class(module, name)
+
+
 # FLAME lip vertex indices (standard FLAME topology)
 # These indices correspond to the inner and outer lip vertices in the FLAME mesh.
 FLAME_LIP_VERTEX_IDS = [
@@ -45,7 +56,7 @@ class FLAMEDecoder:
             return
 
         with open(self.flame_model_path, "rb") as f:
-            model = pickle.load(f, encoding="latin1")
+            model = _FlameUnpickler(f, encoding="latin1").load()
 
         # Template vertices [5023, 3]
         v_template = np.array(model["v_template"], dtype=np.float32)

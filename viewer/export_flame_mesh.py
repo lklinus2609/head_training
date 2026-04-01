@@ -19,15 +19,39 @@ import argparse
 import struct
 from pathlib import Path
 
+import io
 import numpy as np
 import pickle
 
 
+class _ChumbyStub:
+    """Stub that stands in for chumpy arrays during unpickling."""
+    pass
+
+
+class _FlameUnpickler(pickle.Unpickler):
+    """Custom unpickler that replaces chumpy references with numpy arrays."""
+
+    def find_class(self, module, name):
+        if "chumpy" in module:
+            return _ChumbyStub
+        return super().find_class(module, name)
+
+
+def _to_numpy(obj):
+    """Recursively convert chumpy stubs and arrays to numpy."""
+    if isinstance(obj, _ChumbyStub):
+        return np.array(obj)
+    if isinstance(obj, dict):
+        return {k: _to_numpy(v) for k, v in obj.items()}
+    return obj
+
+
 def load_flame_model(flame_path: str) -> dict:
-    """Load the FLAME model from a pickle file."""
+    """Load the FLAME model from a pickle file, handling chumpy dependencies."""
     with open(flame_path, "rb") as f:
-        model = pickle.load(f, encoding="latin1")
-    return model
+        model = _FlameUnpickler(f, encoding="latin1").load()
+    return _to_numpy(model)
 
 
 def export_binary(flame_path: str, output_path: str, n_expression: int = 100):
