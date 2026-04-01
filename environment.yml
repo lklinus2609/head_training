@@ -25,7 +25,6 @@ dependencies:
       - wandb
       - transformers
       - huggingface_hub
-      - flame-pytorch
       - trimesh
       - pyrender
       - fastapi

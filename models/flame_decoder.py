@@ -1,7 +1,14 @@
-"""FLAME mesh decoder wrapper for evaluation metrics (LVE)."""
+"""FLAME mesh decoder for evaluation metrics (LVE).
 
+Loads the FLAME model directly from the pickle file, avoiding the flame-pytorch
+package (which has a broken chumpy dependency). The expression decoding is a
+simple linear operation: vertices = template + expr_basis @ expression_params.
+"""
+
+import pickle
+
+import numpy as np
 import torch
-import torch.nn as nn
 
 
 # FLAME lip vertex indices (standard FLAME topology)
@@ -19,40 +26,38 @@ FLAME_LIP_VERTEX_IDS = [
 
 
 class FLAMEDecoder:
-    """Thin wrapper around the FLAME model for decoding expression parameters to mesh vertices.
+    """Decodes FLAME expression parameters to mesh vertices.
 
+    Loads the FLAME pickle directly and applies the expression blendshapes
+    as a linear combination: vertices = template + expr_basis @ params.
     Used at evaluation time only (not during training backward passes).
     """
 
     def __init__(self, flame_model_path: str, device: str = "cpu"):
-        """
-        Args:
-            flame_model_path: Path to the FLAME .pkl model file.
-            device: Device to load the model on.
-        """
         self.device = device
-        self.flame = None
         self.flame_model_path = flame_model_path
+        self._template = None
+        self._expr_basis = None
 
-    def _load_flame(self):
-        """Lazy-load the FLAME model."""
-        if self.flame is not None:
+    def _load(self):
+        """Lazy-load the FLAME model from pickle."""
+        if self._template is not None:
             return
 
-        try:
-            from flame_pytorch import FLAME, FLAMEConfig
+        with open(self.flame_model_path, "rb") as f:
+            model = pickle.load(f, encoding="latin1")
 
-            flame_config = FLAMEConfig(
-                flame_model_path=self.flame_model_path,
-                n_shape=300,
-                n_exp=100,
-            )
-            self.flame = FLAME(flame_config).to(self.device).eval()
-        except ImportError:
-            raise ImportError(
-                "flame-pytorch is required for FLAME mesh decoding. "
-                "Install with: pip install flame-pytorch"
-            )
+        # Template vertices [5023, 3]
+        v_template = np.array(model["v_template"], dtype=np.float32)
+        self._template = torch.from_numpy(v_template).to(self.device)
+
+        # Expression blendshapes: last 100 columns of shapedirs
+        # shapedirs is [5023, 3, 400] where cols 300-399 are expression
+        shapedirs = np.array(model["shapedirs"], dtype=np.float32)
+        expr_basis = shapedirs[:, :, 300:400]  # [5023, 3, 100]
+        # Reshape to [5023*3, 100] for matrix multiply
+        expr_basis = expr_basis.reshape(-1, 100)
+        self._expr_basis = torch.from_numpy(expr_basis).to(self.device)
 
     def expression_to_vertices(
         self, expression_params: torch.Tensor
@@ -65,15 +70,15 @@ class FLAMEDecoder:
         Returns:
             Mesh vertices [B, V, 3] where V=5023.
         """
-        self._load_flame()
+        self._load()
         B = expression_params.size(0)
+        params = expression_params.to(self.device)
 
-        with torch.no_grad():
-            vertices, _ = self.flame(
-                shape_params=torch.zeros(B, 300, device=self.device),
-                expression_params=expression_params.to(self.device),
-                pose_params=torch.zeros(B, 6, device=self.device),
-            )
+        # offsets = expr_basis @ params^T  ->  [5023*3, B]
+        offsets = self._expr_basis @ params.T  # [5023*3, B]
+        offsets = offsets.T.reshape(B, -1, 3)  # [B, 5023, 3]
+
+        vertices = self._template.unsqueeze(0) + offsets  # [B, 5023, 3]
         return vertices
 
     def get_lip_vertices(self, vertices: torch.Tensor) -> torch.Tensor:
