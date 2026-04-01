@@ -49,13 +49,14 @@ def download_beat2(output_dir: str, dry_run: bool = False):
             break
         return
 
-    print(f"Downloading BEAT2 dataset to {output_dir}...")
-    print("This may take a while (dataset is ~60GB).")
+    print(f"Downloading BEAT2 English dataset to {output_dir}...")
+    print("This may take a while.")
 
     snapshot_download(
         repo_id="H-Liu1997/BEAT2",
         repo_type="dataset",
         local_dir=output_dir,
+        allow_patterns=["beat_english_v2.0.0/**"],
     )
 
     print(f"Download complete. Data saved to {output_dir}")
