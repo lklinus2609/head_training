@@ -1,6 +1,18 @@
-"""Preprocess BEAT2 dataset: extract FLAME params, audio features, compute derivatives, write HDF5."""
+"""Preprocess BEAT2 dataset: extract FLAME params, audio features, compute derivatives, write HDF5.
+
+BEAT2 directory structure (from HuggingFace H-Liu1997/BEAT2):
+    beat_english_v2.0.0/
+        smplxflame_30/    # NPZ motion files at 30fps
+        wave16k/          # WAV audio files at 16kHz
+        train_test_split.csv  # Official train/val/test split
+
+NPZ keys: betas, poses, expressions [T,100], trans, model, gender, mocap_frame_rate
+Filename convention: {speaker_id}_{speaker_name}_{emotion}_{seq}_{take}.npz
+Emotion is encoded in the filename (3rd field): 0=neutral, 1=happiness, etc.
+"""
 
 import argparse
+import csv
 import json
 import os
 from functools import partial
@@ -16,52 +28,96 @@ from data.audio_features import extract_mel, extract_wav2vec
 from data.flame_utils import compute_acceleration, compute_velocity, resample_to_fps
 
 
-# Emotion label mapping (BEAT2 convention)
-EMOTION_MAP = {
-    "neutral": 0,
-    "happiness": 1,
-    "anger": 2,
-    "sadness": 3,
-    "contempt": 4,
-    "surprise": 5,
-    "fear": 6,
-    "disgust": 7,
+# BEAT2 emotion mapping (encoded as integer in filename)
+EMOTION_LABELS = {
+    0: "neutral",
+    1: "happiness",
+    2: "anger",
+    3: "sadness",
+    4: "contempt",
+    5: "surprise",
+    6: "fear",
+    7: "disgust",
 }
+
+
+def load_split_csv(raw_dir: str) -> dict[str, str]:
+    """Load the official BEAT2 train/val/test split.
+
+    Returns dict mapping utterance_id -> split ("train", "val", "test").
+    """
+    csv_path = Path(raw_dir) / "beat_english_v2.0.0" / "train_test_split.csv"
+    if not csv_path.exists():
+        # Try one level up
+        csv_path = Path(raw_dir) / "train_test_split.csv"
+    if not csv_path.exists():
+        return {}
+
+    splits = {}
+    with open(csv_path) as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            splits[row["id"]] = row["type"]
+
+    print(f"Loaded split CSV: {len(splits)} entries")
+    return splits
 
 
 def discover_utterances(raw_dir: str) -> list[dict]:
     """Walk the BEAT2 raw directory and build a manifest of all utterances.
 
-    Returns a list of dicts with keys: speaker_id, utterance_id, npz_path, wav_path, emotion.
+    Looks for NPZ files in smplxflame_30/ and matching WAV files in wave16k/.
     """
     manifest = []
     raw_path = Path(raw_dir)
 
-    for npz_file in sorted(raw_path.rglob("*.npz")):
-        # BEAT2 naming: {id}_{speaker}_{emotion}_{seq}_{take}.npz
-        stem = npz_file.stem
-        parts = stem.split("_")
-        if len(parts) < 3:
-            continue
+    # Find the smplxflame_30 directory
+    npz_dirs = list(raw_path.rglob("smplxflame_30"))
+    if not npz_dirs:
+        # Fallback: search for npz files anywhere
+        npz_dirs = [raw_path]
 
-        speaker_id = parts[1] if len(parts) >= 2 else "unknown"
+    # Find the wave16k directory
+    wav_dirs = list(raw_path.rglob("wave16k"))
+    wav_dir = wav_dirs[0] if wav_dirs else None
 
-        # Look for matching wav file
-        wav_file = npz_file.with_suffix(".wav")
-        if not wav_file.exists():
-            # Try looking in adjacent audio directory
-            wav_file = npz_file.parent / "audio" / f"{stem}.wav"
-            if not wav_file.exists():
+    for npz_dir in npz_dirs:
+        for npz_file in sorted(npz_dir.glob("*.npz")):
+            stem = npz_file.stem
+            parts = stem.split("_")
+            # Format: {speaker_id}_{speaker_name}_{emotion}_{seq}_{take}
+            if len(parts) < 5:
                 continue
 
-        # Try to extract emotion from the npz data or filename
-        # BEAT2 stores emotion in the npz metadata
-        manifest.append({
-            "speaker_id": speaker_id,
-            "utterance_id": stem,
-            "npz_path": str(npz_file),
-            "wav_path": str(wav_file),
-        })
+            speaker_id = parts[0]
+            speaker_name = parts[1]
+            emotion = int(parts[2])
+
+            # Find matching wav file
+            wav_file = None
+            if wav_dir and (wav_dir / f"{stem}.wav").exists():
+                wav_file = wav_dir / f"{stem}.wav"
+            else:
+                # Try sibling directory
+                for candidate in [
+                    npz_file.parent.parent / "wave16k" / f"{stem}.wav",
+                    npz_file.with_suffix(".wav"),
+                ]:
+                    if candidate.exists():
+                        wav_file = candidate
+                        break
+
+            if wav_file is None:
+                continue
+
+            manifest.append({
+                "speaker_id": speaker_id,
+                "speaker_name": speaker_name,
+                "utterance_id": stem,
+                "npz_path": str(npz_file),
+                "wav_path": str(wav_file),
+                "emotion": emotion,
+            })
 
     print(f"Discovered {len(manifest)} utterances from {raw_dir}")
     return manifest
@@ -75,33 +131,14 @@ def process_utterance(
     mel_config: dict,
     wav2vec_config: dict,
 ) -> dict | None:
-    """Process a single utterance: extract FLAME params, audio features, derivatives.
-
-    Returns a dict with processed arrays, or None on failure.
-    """
+    """Process a single utterance: extract FLAME params, audio features, derivatives."""
     try:
-        # Load npz
         data = np.load(entry["npz_path"], allow_pickle=True)
 
-        # Extract FLAME expression parameters
-        # BEAT2 stores these under various keys - try common ones
-        expression = None
-        for key in ["expression", "exp", "flame_expression", "face_expression"]:
-            if key in data:
-                expression = data[key].astype(np.float32)
-                break
-
-        if expression is None:
-            # Try extracting from SMPLX params
-            if "poses" in data:
-                # Some BEAT2 formats embed expression in the full parameter vector
-                # Expression is typically the last 100 dims of the SMPLX params
-                poses = data["poses"]
-                if poses.shape[-1] >= flame_expr_dim:
-                    expression = poses[:, -flame_expr_dim:].astype(np.float32)
-
-        if expression is None:
+        # BEAT2 stores expressions under the "expressions" key [T, 100] float64
+        if "expressions" not in data:
             return None
+        expression = data["expressions"].astype(np.float32)
 
         # Truncate or pad to flame_expr_dim
         if expression.shape[-1] > flame_expr_dim:
@@ -110,22 +147,22 @@ def process_utterance(
             pad_width = flame_expr_dim - expression.shape[-1]
             expression = np.pad(expression, ((0, 0), (0, pad_width)))
 
-        # Determine source FPS (BEAT2 is typically 30 FPS, but check)
+        # Source FPS from the file
         source_fps = 30.0
-        if "fps" in data:
-            source_fps = float(data["fps"])
+        if "mocap_frame_rate" in data:
+            source_fps = float(data["mocap_frame_rate"])
 
-        # Resample motion to target FPS
+        # Resample motion to target FPS if needed
         expression = resample_to_fps(expression, source_fps, target_fps)
 
         # Compute derivatives
         velocity = compute_velocity(expression)
         acceleration = compute_acceleration(expression)
 
-        # Load audio
+        # Load audio (BEAT2 wave16k is 16kHz mono)
         waveform, sr = sf.read(entry["wav_path"])
         if waveform.ndim > 1:
-            waveform = waveform.mean(axis=1)  # Mono
+            waveform = waveform.mean(axis=1)
         waveform = waveform.astype(np.float32)
 
         # Extract audio features
@@ -142,25 +179,18 @@ def process_utterance(
                 model_name=wav2vec_config["model"],
             )
 
-        # Align lengths (audio features and motion may differ by a frame or two)
+        # Align lengths (audio and motion may differ by a few frames)
         min_len = min(expression.shape[0], audio_feats.shape[0])
         expression = expression[:min_len]
         velocity = velocity[:min_len]
         acceleration = acceleration[:min_len]
         audio_feats = audio_feats[:min_len]
 
-        if min_len < 10:  # Skip very short utterances
+        if min_len < 10:
             return None
 
-        # Extract emotion label
-        emotion = 0  # Default to neutral
-        if "emotion" in data:
-            emo = data["emotion"]
-            if isinstance(emo, np.ndarray):
-                emo = str(emo.item()) if emo.size == 1 else str(emo[0])
-            else:
-                emo = str(emo)
-            emotion = EMOTION_MAP.get(emo.lower(), 0)
+        # Emotion from filename
+        emotion = entry.get("emotion", 0)
 
         return {
             "speaker_id": entry["speaker_id"],
@@ -198,12 +228,10 @@ def write_hdf5(results: list[dict], stats: dict, output_path: str):
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
     with h5py.File(output_path, "w") as f:
-        # Write statistics
         stats_grp = f.create_group("stats")
         for key, value in stats.items():
             stats_grp.create_dataset(key, data=value)
 
-        # Write utterances grouped by speaker
         for result in results:
             speaker = result["speaker_id"]
             utt = result["utterance_id"]
@@ -229,7 +257,6 @@ def main():
     parser.add_argument("--dry_run", action="store_true", help="Process one utterance and print structure")
     args = parser.parse_args()
 
-    # Load config
     from configs_schema import load_config
     config = load_config(args.config)
 
@@ -242,6 +269,9 @@ def main():
     if not manifest:
         print("No utterances found. Check raw_dir path.")
         return
+
+    # Load official train/val/test split
+    split_map = load_split_csv(raw_dir)
 
     if args.dry_run:
         print("=== Dry run: processing first utterance ===")
@@ -260,17 +290,29 @@ def main():
             print(f"Velocity: {result['velocity'].shape}")
             print(f"Acceleration: {result['acceleration'].shape}")
             print(f"Audio features: {result['audio_features'].shape}")
-            print(f"Emotion: {result['emotion_label']}")
+            print(f"Emotion: {result['emotion_label']} ({EMOTION_LABELS.get(result['emotion_label'], 'unknown')})")
         else:
             print("Failed to process utterance.")
         return
 
-    # Split by speaker
-    dev_speakers = set(config.data.dev_speakers)
-    train_manifest = [e for e in manifest if e["speaker_id"] not in dev_speakers]
-    val_manifest = [e for e in manifest if e["speaker_id"] in dev_speakers]
+    # Split using official CSV if available, otherwise fall back to speaker-based split
+    if split_map:
+        train_manifest = [e for e in manifest if split_map.get(e["utterance_id"]) == "train"]
+        val_manifest = [e for e in manifest if split_map.get(e["utterance_id"]) == "val"]
+        test_manifest = [e for e in manifest if split_map.get(e["utterance_id"]) == "test"]
+        # Include unmatched entries in training
+        matched_ids = set(split_map.keys())
+        unmatched = [e for e in manifest if e["utterance_id"] not in matched_ids]
+        if unmatched:
+            print(f"Warning: {len(unmatched)} utterances not in split CSV, adding to train")
+            train_manifest.extend(unmatched)
+    else:
+        print("No split CSV found, falling back to speaker-based split")
+        dev_speakers = set(config.data.dev_speakers)
+        train_manifest = [e for e in manifest if e["speaker_id"] not in dev_speakers]
+        val_manifest = [e for e in manifest if e["speaker_id"] in dev_speakers]
 
-    print(f"Train: {len(train_manifest)} utterances, Val: {len(val_manifest)} utterances")
+    print(f"Train: {len(train_manifest)}, Val: {len(val_manifest)}")
 
     # Process utterances
     process_fn = partial(
@@ -317,8 +359,7 @@ def main():
         "flame_expr_dim": config.data.flame_expr_dim,
         "train_utterances": len(train_results),
         "val_utterances": len(val_results),
-        "dev_speakers": list(dev_speakers),
-        "emotion_map": EMOTION_MAP,
+        "emotion_labels": EMOTION_LABELS,
         "train_total_frames": sum(r["expression"].shape[0] for r in train_results),
         "val_total_frames": sum(r["expression"].shape[0] for r in val_results),
     }
