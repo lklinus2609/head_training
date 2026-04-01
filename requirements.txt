@@ -1,6 +1,6 @@
 torch>=2.1.0
 torchaudio>=2.1.0
-numpy
+numpy<2
 scipy
 h5py
 librosa
@@ -10,7 +10,7 @@ tqdm
 scikit-learn
 matplotlib
 wandb
-transformers
+transformers>=4.30,<4.46
 huggingface_hub
 trimesh
 pyrender
