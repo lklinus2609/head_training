@@ -19,39 +19,57 @@ import argparse
 import struct
 from pathlib import Path
 
-import io
+import sys
+import types
 import numpy as np
 import pickle
 
 
-class _ChumbyStub:
-    """Stub that stands in for chumpy arrays during unpickling."""
-    pass
+def _setup_chumpy_shim():
+    """Create a fake chumpy module that redirects everything to numpy.
 
+    The FLAME pickle contains chumpy.Ch arrays. When unpickling, Python needs
+    the chumpy module to reconstruct them. This shim makes chumpy.Ch behave
+    as a numpy ndarray so unpickling works without installing chumpy.
+    """
+    if "chumpy" in sys.modules:
+        return
 
-class _FlameUnpickler(pickle.Unpickler):
-    """Custom unpickler that replaces chumpy references with numpy arrays."""
+    # Create fake chumpy module
+    chumpy = types.ModuleType("chumpy")
+    chumpy.__package__ = "chumpy"
 
-    def find_class(self, module, name):
-        if "chumpy" in module:
-            return _ChumbyStub
-        return super().find_class(module, name)
+    # Ch class that behaves like numpy array
+    class Ch(np.ndarray):
+        pass
 
+    chumpy.Ch = Ch
+    chumpy.ch = types.ModuleType("chumpy.ch")
+    chumpy.ch.Ch = Ch
 
-def _to_numpy(obj):
-    """Recursively convert chumpy stubs and arrays to numpy."""
-    if isinstance(obj, _ChumbyStub):
-        return np.array(obj)
-    if isinstance(obj, dict):
-        return {k: _to_numpy(v) for k, v in obj.items()}
-    return obj
+    # Register all submodules the pickle might reference
+    for submod_name in ["ch", "utils", "logic", "reordering"]:
+        mod = types.ModuleType(f"chumpy.{submod_name}")
+        mod.Ch = Ch
+        sys.modules[f"chumpy.{submod_name}"] = mod
+
+    sys.modules["chumpy"] = chumpy
 
 
 def load_flame_model(flame_path: str) -> dict:
     """Load the FLAME model from a pickle file, handling chumpy dependencies."""
+    _setup_chumpy_shim()
     with open(flame_path, "rb") as f:
-        model = _FlameUnpickler(f, encoding="latin1").load()
-    return _to_numpy(model)
+        model = pickle.load(f, encoding="latin1")
+
+    # Convert any remaining non-numpy arrays to numpy
+    result = {}
+    for key, val in model.items():
+        try:
+            result[key] = np.array(val)
+        except Exception:
+            result[key] = val
+    return result
 
 
 def export_binary(flame_path: str, output_path: str, n_expression: int = 100):

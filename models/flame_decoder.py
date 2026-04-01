@@ -6,20 +6,31 @@ simple linear operation: vertices = template + expr_basis @ expression_params.
 """
 
 import pickle
+import sys
+import types
 
 import numpy as np
 import torch
 
 
-class _ChumbyStub:
-    pass
+def _setup_chumpy_shim():
+    """Create a fake chumpy module so FLAME pickle can be loaded without chumpy."""
+    if "chumpy" in sys.modules:
+        return
+    chumpy = types.ModuleType("chumpy")
+    chumpy.__package__ = "chumpy"
 
+    class Ch(np.ndarray):
+        pass
 
-class _FlameUnpickler(pickle.Unpickler):
-    def find_class(self, module, name):
-        if "chumpy" in module:
-            return _ChumbyStub
-        return super().find_class(module, name)
+    chumpy.Ch = Ch
+    chumpy.ch = types.ModuleType("chumpy.ch")
+    chumpy.ch.Ch = Ch
+    for submod_name in ["ch", "utils", "logic", "reordering"]:
+        mod = types.ModuleType(f"chumpy.{submod_name}")
+        mod.Ch = Ch
+        sys.modules[f"chumpy.{submod_name}"] = mod
+    sys.modules["chumpy"] = chumpy
 
 
 # FLAME lip vertex indices (standard FLAME topology)
@@ -55,8 +66,9 @@ class FLAMEDecoder:
         if self._template is not None:
             return
 
+        _setup_chumpy_shim()
         with open(self.flame_model_path, "rb") as f:
-            model = _FlameUnpickler(f, encoding="latin1").load()
+            model = pickle.load(f, encoding="latin1")
 
         # Template vertices [5023, 3]
         v_template = np.array(model["v_template"], dtype=np.float32)
