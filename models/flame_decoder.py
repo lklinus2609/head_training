@@ -6,31 +6,19 @@ simple linear operation: vertices = template + expr_basis @ expression_params.
 """
 
 import pickle
-import sys
-import types
 
 import numpy as np
 import torch
 
 
-def _setup_chumpy_shim():
-    """Create a fake chumpy module so FLAME pickle can be loaded without chumpy."""
-    if "chumpy" in sys.modules:
-        return
-    chumpy = types.ModuleType("chumpy")
-    chumpy.__package__ = "chumpy"
-
-    class Ch(np.ndarray):
-        pass
-
-    chumpy.Ch = Ch
-    chumpy.ch = types.ModuleType("chumpy.ch")
-    chumpy.ch.Ch = Ch
-    for submod_name in ["ch", "utils", "logic", "reordering"]:
-        mod = types.ModuleType(f"chumpy.{submod_name}")
-        mod.Ch = Ch
-        sys.modules[f"chumpy.{submod_name}"] = mod
-    sys.modules["chumpy"] = chumpy
+def _load_flame_pickle(flame_path: str) -> dict:
+    """Load FLAME pickle, replacing chumpy references in the byte stream."""
+    with open(flame_path, "rb") as f:
+        data = f.read()
+    data = data.replace(b"chumpy.ch\nCh\n", b"numpy\nndarray\n")
+    data = data.replace(b"chumpy\nCh\n", b"numpy\nndarray\n")
+    model = pickle.loads(data, encoding="latin1")
+    return {k: np.array(v) if hasattr(v, "__array__") else v for k, v in model.items()}
 
 
 # FLAME lip vertex indices (standard FLAME topology)
@@ -66,9 +54,7 @@ class FLAMEDecoder:
         if self._template is not None:
             return
 
-        _setup_chumpy_shim()
-        with open(self.flame_model_path, "rb") as f:
-            model = pickle.load(f, encoding="latin1")
+        model = _load_flame_pickle(self.flame_model_path)
 
         # Template vertices [5023, 3]
         v_template = np.array(model["v_template"], dtype=np.float32)

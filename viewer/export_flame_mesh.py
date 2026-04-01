@@ -19,50 +19,30 @@ import argparse
 import struct
 from pathlib import Path
 
-import sys
-import types
 import numpy as np
 import pickle
 
 
-def _setup_chumpy_shim():
-    """Create a fake chumpy module that redirects everything to numpy.
-
-    The FLAME pickle contains chumpy.Ch arrays. When unpickling, Python needs
-    the chumpy module to reconstruct them. This shim makes chumpy.Ch behave
-    as a numpy ndarray so unpickling works without installing chumpy.
-    """
-    if "chumpy" in sys.modules:
-        return
-
-    # Create fake chumpy module
-    chumpy = types.ModuleType("chumpy")
-    chumpy.__package__ = "chumpy"
-
-    # Ch class that behaves like numpy array
-    class Ch(np.ndarray):
-        pass
-
-    chumpy.Ch = Ch
-    chumpy.ch = types.ModuleType("chumpy.ch")
-    chumpy.ch.Ch = Ch
-
-    # Register all submodules the pickle might reference
-    for submod_name in ["ch", "utils", "logic", "reordering"]:
-        mod = types.ModuleType(f"chumpy.{submod_name}")
-        mod.Ch = Ch
-        sys.modules[f"chumpy.{submod_name}"] = mod
-
-    sys.modules["chumpy"] = chumpy
-
-
 def load_flame_model(flame_path: str) -> dict:
-    """Load the FLAME model from a pickle file, handling chumpy dependencies."""
-    _setup_chumpy_shim()
-    with open(flame_path, "rb") as f:
-        model = pickle.load(f, encoding="latin1")
+    """Load the FLAME model from a pickle file, handling chumpy dependencies.
 
-    # Convert any remaining non-numpy arrays to numpy
+    Uses numpy's encoding trick: reads the pickle bytes, replaces all
+    chumpy module references with numpy equivalents, then unpickles.
+    """
+    import re
+
+    with open(flame_path, "rb") as f:
+        data = f.read()
+
+    # Replace chumpy module references in the pickle byte stream
+    # Pickle stores module/class names as strings. We replace chumpy.ch.Ch
+    # and chumpy.Ch with numpy.ndarray so pickle reconstructs numpy arrays.
+    data = data.replace(b"chumpy.ch\nCh\n", b"numpy\nndarray\n")
+    data = data.replace(b"chumpy\nCh\n", b"numpy\nndarray\n")
+
+    model = pickle.loads(data, encoding="latin1")
+
+    # Convert any non-numpy arrays to numpy
     result = {}
     for key, val in model.items():
         try:
