@@ -1,0 +1,30 @@
+name: d4head
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch=2.1.*
+  - torchaudio
+  - torchvision
+  - pytorch-cuda=11.8
+  - numpy
+  - scipy
+  - h5py
+  - librosa
+  - soundfile
+  - pyyaml
+  - tqdm
+  - scikit-learn
+  - matplotlib
+  - pip
+  - pip:
+      - wandb
+      - transformers
+      - huggingface_hub
+      - flame-pytorch
+      - trimesh
+      - pyrender
+      - fastapi
+      - uvicorn[standard]

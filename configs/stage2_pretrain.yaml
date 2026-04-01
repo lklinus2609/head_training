@@ -1,0 +1,13 @@
+_base_: base.yaml
+
+stage2:
+  epochs: 100
+  batch_size: 64
+  lr: 1.0e-4
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 1.0e-5
+  grad_clip: 1.0
+  val_every: 1
+  save_every: 5
+  seed: 42

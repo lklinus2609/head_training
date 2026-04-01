@@ -1,0 +1,19 @@
+_base_: base.yaml
+
+stage3:
+  epochs: 100
+  batch_size: 64
+  gen_lr: 5.0e-5
+  gen_beta1: 0.5
+  gen_beta2: 0.999
+  disc_lr: 2.0e-4
+  disc_beta1: 0.5
+  disc_beta2: 0.999
+  weight_decay: 1.0e-5
+  grad_clip: 1.0
+  lambda_adv_start: 0.01
+  lambda_adv_end: 0.1
+  lambda_warmup_steps: 10000
+  disc_steps_per_gen: 1
+  pretrained_gen_path: "$WORK/checkpoints/d4head/stage2_best.pt"
+  seed: 42

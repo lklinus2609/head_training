@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FLAME Expression Viewer</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="app">
+        <div id="viewport">
+            <div id="fps-counter">-- fps</div>
+            <div id="frame-info"></div>
+            <div id="no-data-msg">
+                <h2>FLAME Expression Viewer</h2>
+                <p>Load a FLAME mesh binary (flame_data.bin) and<br>
+                an expression sequence (.npy) to begin.</p>
+            </div>
+        </div>
+
+        <div id="panel">
+            <div class="panel-section">
+                <h3>Mesh Data</h3>
+                <div id="drop-zone-mesh" class="drop-zone-area">
+                    <div id="drop-zone">Drop flame_data.bin here<br>or click to browse</div>
+                    <input type="file" id="mesh-file-input" accept=".bin" style="display:none">
+                </div>
+                <div id="mesh-status" style="font-size:12px;color:#666;margin-top:6px;"></div>
+            </div>
+
+            <div class="panel-section">
+                <h3>Sequences</h3>
+                <div id="sequence-list"></div>
+                <div style="margin-top:8px;">
+                    <div id="drop-zone-seq" style="border:1px dashed #3a3a5a;border-radius:6px;padding:12px;text-align:center;color:#666;font-size:12px;cursor:pointer;">
+                        Drop .npy sequence or click to browse
+                    </div>
+                    <input type="file" id="seq-file-input" accept=".npy" style="display:none">
+                </div>
+            </div>
+
+            <div class="panel-section">
+                <h3>Playback</h3>
+                <div class="controls-row">
+                    <button class="btn" id="btn-play">Play</button>
+                    <button class="btn" id="btn-pause">Pause</button>
+                    <button class="btn" id="btn-reset">Reset</button>
+                </div>
+                <input type="range" id="timeline" min="0" max="100" value="0">
+                <div class="speed-control">
+                    <span>Speed:</span>
+                    <input type="range" id="speed-slider" min="0.1" max="3.0" step="0.1" value="1.0">
+                    <span id="speed-value">1.0x</span>
+                </div>
+            </div>
+
+            <div class="panel-section">
+                <h3>WebSocket Stream</h3>
+                <div class="controls-row">
+                    <span class="ws-status disconnected" id="ws-indicator"></span>
+                    <button class="btn" id="btn-ws-connect">Connect</button>
+                    <button class="btn" id="btn-ws-disconnect">Disconnect</button>
+                </div>
+                <div style="margin-top:6px;">
+                    <input type="text" id="ws-sequence-name" value="demo"
+                        style="width:100%;padding:4px 8px;background:#1a1a2e;border:1px solid #3a3a5a;border-radius:4px;color:#e0e0e0;font-size:12px;"
+                        placeholder="Sequence name for streaming">
+                </div>
+            </div>
+
+            <div class="panel-section">
+                <h3>Expression Weights</h3>
+                <div id="weight-sliders"></div>
+            </div>
+
+            <div id="status">Ready</div>
+        </div>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script type="module" src="/static/viewer.js"></script>
+</body>
+</html>

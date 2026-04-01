@@ -1,0 +1,47 @@
+paths:
+  beat2_raw_dir: "$WORK/data/beat2_raw"
+  processed_dir: "$WORK/data/beat2_processed"
+  flame_model_path: "$WORK/models/flame/generic_model.pkl"
+  checkpoint_dir: "$WORK/checkpoints/d4head"
+  wandb_dir: "$WORK/wandb"
+
+data:
+  fps: 30
+  audio_feature: "mel"
+  mel_n_mels: 80
+  mel_win_ms: 25.0
+  mel_hop_ms: 10.0
+  wav2vec_model: "facebook/wav2vec2-base-960h"
+  wav2vec_dim: 768
+  flame_expr_dim: 100
+  context_past: 10
+  context_future: 5
+  prev_frames: 2
+  seq_len: 60
+  disc_window: 5
+  dev_speakers: ["2", "4", "6", "8"]
+  num_workers: 4
+  pin_memory: true
+
+generator:
+  d_model: 256
+  n_layers: 4
+  n_heads: 8
+  d_ff: 1024
+  dropout: 0.1
+  n_emotions: 8
+  emotion_embed_dim: 64
+  audio_conv_channels: [128, 256]
+  audio_conv_kernel_sizes: [5, 3]
+
+discriminator:
+  d_model: 256
+  n_layers: 3
+  n_heads: 4
+  d_ff: 512
+  dropout: 0.1
+  fc_hidden: 128
+  gp_weight: 10.0
+
+wandb_project: "d4-head-facial-motion"
+wandb_entity: ""
