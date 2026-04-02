@@ -70,13 +70,18 @@ def load_checkpoint(
         if optimizer is not None and f"{name}_optimizer" in ckpt:
             optimizer.load_state_dict(ckpt[f"{name}_optimizer"])
 
-    # Restore RNG states
+    # Restore RNG states (best-effort, skip on type errors from device mapping)
     if "rng_states" in ckpt:
         rng = ckpt["rng_states"]
-        random.setstate(rng["python"])
-        np.random.set_state(rng["numpy"])
-        torch.random.set_rng_state(rng["torch"])
-        torch.cuda.set_rng_state_all(rng["cuda"])
+        try:
+            random.setstate(rng["python"])
+            np.random.set_state(rng["numpy"])
+            torch.random.set_rng_state(rng["torch"].cpu() if isinstance(rng["torch"], torch.Tensor) else rng["torch"])
+            cuda_states = rng["cuda"]
+            if cuda_states and len(cuda_states) == torch.cuda.device_count():
+                torch.cuda.set_rng_state_all([s.cpu() if isinstance(s, torch.Tensor) else s for s in cuda_states])
+        except Exception:
+            pass  # RNG restore is nice-to-have, not critical
 
     return ckpt
 
