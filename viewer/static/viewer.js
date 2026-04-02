@@ -15,8 +15,11 @@ const state = {
     meshLoaded: false,
 
     // Sequence data
-    sequences: [],         // [{name, data: Float32Array[T*D], frames, dims}]
+    sequences: [],         // [{name, data, frames, dims, has_gt, gt_filename}]
     activeSequence: null,
+    activeGT: null,        // Ground truth sequence data {data, frames, dims} or null
+    viewMode: 'prediction', // 'prediction' | 'ground_truth' | 'overlay'
+    errorPerFrame: null,   // Float32Array [T] of per-frame L1 errors
 
     // Playback
     playing: false,
@@ -36,6 +39,8 @@ const state = {
     controls: null,
     mesh: null,
     geometry: null,
+    gtMesh: null,          // Overlay wireframe mesh for ground truth
+    gtGeometry: null,
 };
 
 // ============================================================
@@ -162,34 +167,78 @@ function createMesh() {
     state.controls.update();
 }
 
+function createGTOverlayMesh() {
+    if (state.gtMesh) {
+        state.scene.remove(state.gtMesh);
+        state.gtGeometry.dispose();
+    }
+
+    state.gtGeometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(state.templateVerts.length);
+    positions.set(state.templateVerts);
+
+    state.gtGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    state.gtGeometry.setIndex(new THREE.BufferAttribute(state.faceIndices, 1));
+    state.gtGeometry.computeVertexNormals();
+
+    const material = new THREE.MeshPhongMaterial({
+        color: 0x4a90d9,
+        specular: 0x222222,
+        shininess: 20,
+        side: THREE.DoubleSide,
+        wireframe: true,
+        opacity: 0.5,
+        transparent: true,
+    });
+
+    state.gtMesh = new THREE.Mesh(state.gtGeometry, material);
+    state.gtMesh.visible = false;
+    state.scene.add(state.gtMesh);
+}
+
 // ============================================================
 // Expression Weight Application
 // ============================================================
-function applyWeights(weights) {
-    if (!state.meshLoaded || !state.geometry) return;
+function applyWeightsToGeometry(weights, geometry) {
+    if (!state.meshLoaded || !geometry) return;
 
-    const positions = state.geometry.attributes.position.array;
+    const positions = geometry.attributes.position.array;
     const numVerts3 = state.numVerts * 3;
 
-    // Start from template
     positions.set(state.templateVerts);
 
-    // Add weighted basis vectors
     for (let e = 0; e < state.numExpr && e < weights.length; e++) {
         const w = weights[e];
         if (Math.abs(w) < 0.0001) continue;
-
         const basisOffset = e * numVerts3;
         for (let i = 0; i < numVerts3; i++) {
             positions[i] += w * state.exprBasis[basisOffset + i];
         }
     }
 
-    state.geometry.attributes.position.needsUpdate = true;
-    state.geometry.computeVertexNormals();
+    geometry.attributes.position.needsUpdate = true;
+    geometry.computeVertexNormals();
+}
+
+function applyWeights(weights) {
+    if (!state.meshLoaded || !state.geometry) return;
+
+    // Apply to main mesh
+    applyWeightsToGeometry(weights, state.geometry);
+
+    // In overlay mode, also apply GT weights to the overlay mesh
+    if (state.viewMode === 'overlay' && state.gtMesh && state.activeGT) {
+        const gtWeights = getGTFrameWeights(state.currentFrame);
+        if (gtWeights) {
+            applyWeightsToGeometry(gtWeights, state.gtGeometry);
+        }
+    }
 
     // Update weight display
     updateWeightDisplay(weights);
+
+    // Update error display
+    updateErrorDisplay();
 }
 
 // ============================================================
@@ -225,15 +274,24 @@ function loadSequenceFromBuffer(name, buffer) {
 
 function selectSequence(name) {
     state.activeSequence = state.sequences.find(s => s.name === name) || null;
+    state.activeGT = null;
+    state.errorPerFrame = null;
     state.currentFrame = 0;
     state.playing = false;
+    state.viewMode = 'prediction';
 
     if (state.activeSequence) {
         document.getElementById('timeline').max = state.activeSequence.frames - 1;
         document.getElementById('timeline').value = 0;
+
+        // Load ground truth if available
+        if (state.activeSequence.has_gt && state.activeSequence.gt_filename) {
+            loadGroundTruth(state.activeSequence.gt_filename);
+        }
+
+        updateComparisonUI();
         updateFrameInfo();
 
-        // Apply first frame
         const weights = getFrameWeights(0);
         if (weights) applyWeights(weights);
     }
@@ -241,11 +299,120 @@ function selectSequence(name) {
     renderSequenceList();
 }
 
+async function loadGroundTruth(gt_filename) {
+    try {
+        const resp = await fetch(`/api/sequences/${gt_filename}`);
+        if (!resp.ok) return;
+        const buf = await resp.arrayBuffer();
+        const header = new DataView(buf, 0, 8);
+        const rows = header.getUint32(0, true);
+        const cols = header.getUint32(4, true);
+        const floatData = new Float32Array(buf, 8);
+
+        state.activeGT = { data: floatData, frames: rows, dims: cols };
+
+        // Compute per-frame L1 error
+        computeErrorPerFrame();
+        drawErrorGraph();
+        updateComparisonUI();
+        setStatus(`Ground truth loaded (${rows} frames)`);
+    } catch (e) {
+        console.error('Failed to load ground truth:', e);
+    }
+}
+
+function computeErrorPerFrame() {
+    if (!state.activeSequence || !state.activeGT) return;
+    const pred = state.activeSequence;
+    const gt = state.activeGT;
+    const T = Math.min(pred.frames, gt.frames);
+    const D = Math.min(pred.dims, gt.dims);
+
+    state.errorPerFrame = new Float32Array(T);
+    for (let t = 0; t < T; t++) {
+        let sum = 0;
+        for (let d = 0; d < D; d++) {
+            sum += Math.abs(pred.data[t * pred.dims + d] - gt.data[t * gt.dims + d]);
+        }
+        state.errorPerFrame[t] = sum / D;
+    }
+}
+
+function drawErrorGraph() {
+    const canvas = document.getElementById('error-graph');
+    if (!canvas || !state.errorPerFrame) return;
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width = canvas.clientWidth * window.devicePixelRatio;
+    const H = canvas.height = 40 * window.devicePixelRatio;
+    ctx.clearRect(0, 0, W, H);
+
+    const errs = state.errorPerFrame;
+    const maxErr = Math.max(...errs) || 1;
+
+    ctx.strokeStyle = '#d94a4a';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i < errs.length; i++) {
+        const x = (i / errs.length) * W;
+        const y = H - (errs[i] / maxErr) * H;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+}
+
+function updateComparisonUI() {
+    const section = document.getElementById('comparison-section');
+    if (state.activeGT) {
+        section.style.display = '';
+        if (state.gtMesh) state.gtMesh.visible = false;
+        // Create overlay mesh if needed
+        if (!state.gtMesh && state.meshLoaded) createGTOverlayMesh();
+    } else {
+        section.style.display = 'none';
+    }
+    setViewMode(state.viewMode);
+}
+
+function setViewMode(mode) {
+    state.viewMode = mode;
+
+    // Update button styles
+    ['btn-pred', 'btn-gt', 'btn-overlay'].forEach(id => {
+        document.getElementById(id)?.classList.remove('mode-active');
+    });
+    const activeBtn = { prediction: 'btn-pred', ground_truth: 'btn-gt', overlay: 'btn-overlay' }[mode];
+    document.getElementById(activeBtn)?.classList.add('mode-active');
+
+    // Update mesh visibility and color
+    if (state.mesh) {
+        state.mesh.visible = true;
+        state.mesh.material.color.setHex(mode === 'ground_truth' ? 0x7a9fc8 : 0xc8a88c);
+        state.mesh.material.wireframe = false;
+    }
+    if (state.gtMesh) {
+        state.gtMesh.visible = (mode === 'overlay' && state.activeGT !== null);
+    }
+
+    // Re-apply current frame
+    const weights = getFrameWeights(state.currentFrame);
+    if (weights) applyWeights(weights);
+}
+
 function getFrameWeights(frame) {
-    if (!state.activeSequence) return null;
-    const seq = state.activeSequence;
+    // In ground_truth mode, return GT weights; otherwise return prediction
+    const useGT = state.viewMode === 'ground_truth' && state.activeGT;
+    const seq = useGT ? state.activeGT : state.activeSequence;
+    if (!seq) return null;
+    if (frame >= seq.frames) return null;
     const offset = frame * seq.dims;
     return Array.from(seq.data.slice(offset, offset + seq.dims));
+}
+
+function getGTFrameWeights(frame) {
+    if (!state.activeGT || frame >= state.activeGT.frames) return null;
+    const offset = frame * state.activeGT.dims;
+    return Array.from(state.activeGT.data.slice(offset, offset + state.activeGT.dims));
 }
 
 // ============================================================
@@ -357,8 +524,11 @@ function renderSequenceList() {
     for (const seq of state.sequences) {
         const div = document.createElement('div');
         div.className = 'sequence-item' + (state.activeSequence === seq ? ' active' : '');
+        const gtBadge = seq.has_gt
+            ? '<span class="badge badge-gt">Pred + GT</span>'
+            : '<span class="badge badge-pred">Pred only</span>';
         div.innerHTML = `
-            <div>${seq.name}</div>
+            <div>${seq.name}${gtBadge}</div>
             <div class="sequence-meta">${seq.frames} frames (${(seq.frames / 30).toFixed(1)}s) | ${seq.dims} dims</div>
         `;
         div.addEventListener('click', () => selectSequence(seq.name));
@@ -403,11 +573,24 @@ function updateFrameInfo() {
     const info = document.getElementById('frame-info');
     if (state.activeSequence) {
         const t = (state.currentFrame / state.fps).toFixed(2);
-        info.textContent = `Frame ${state.currentFrame} / ${state.activeSequence.frames - 1} | ${t}s`;
+        const modeLabel = { prediction: 'Pred', ground_truth: 'GT', overlay: 'Overlay' }[state.viewMode];
+        info.textContent = `[${modeLabel}] Frame ${state.currentFrame} / ${state.activeSequence.frames - 1} | ${t}s`;
     } else {
         info.textContent = '';
     }
     document.getElementById('timeline').value = state.currentFrame;
+}
+
+function updateErrorDisplay() {
+    const el = document.getElementById('error-display');
+    if (!el) return;
+    if (!state.errorPerFrame || state.currentFrame >= state.errorPerFrame.length) {
+        el.textContent = 'Frame L1: --';
+        return;
+    }
+    const frameErr = state.errorPerFrame[state.currentFrame];
+    const avgErr = state.errorPerFrame.reduce((a, b) => a + b, 0) / state.errorPerFrame.length;
+    el.textContent = `Frame L1: ${frameErr.toFixed(4)} | Avg: ${avgErr.toFixed(4)}`;
 }
 
 function setStatus(msg) {
@@ -519,6 +702,11 @@ function setupEvents() {
         document.getElementById('speed-value').textContent = state.speed.toFixed(1) + 'x';
     });
 
+    // View mode buttons
+    document.getElementById('btn-pred').addEventListener('click', () => setViewMode('prediction'));
+    document.getElementById('btn-gt').addEventListener('click', () => setViewMode('ground_truth'));
+    document.getElementById('btn-overlay').addEventListener('click', () => setViewMode('overlay'));
+
     // WebSocket
     document.getElementById('btn-ws-connect').addEventListener('click', wsConnect);
     document.getElementById('btn-ws-disconnect').addEventListener('click', wsDisconnect);
@@ -546,6 +734,12 @@ function setupEvents() {
             const weights = getFrameWeights(0);
             if (weights) applyWeights(weights);
             updateFrameInfo();
+        } else if (e.code === 'Digit1') {
+            setViewMode('prediction');
+        } else if (e.code === 'Digit2') {
+            if (state.activeGT) setViewMode('ground_truth');
+        } else if (e.code === 'Digit3') {
+            if (state.activeGT) setViewMode('overlay');
         }
     });
 }
@@ -572,7 +766,6 @@ async function tryAutoLoad() {
                 const seqResp = await fetch(`/api/sequences/${seq.filename}`);
                 if (seqResp.ok) {
                     const buf = await seqResp.arrayBuffer();
-                    // Parse server binary format: 8 bytes header (rows, cols as uint32) + float32 data
                     const header = new DataView(buf, 0, 8);
                     const rows = header.getUint32(0, true);
                     const cols = header.getUint32(4, true);
@@ -582,6 +775,8 @@ async function tryAutoLoad() {
                         data: floatData,
                         frames: rows,
                         dims: cols,
+                        has_gt: seq.has_gt || false,
+                        gt_filename: seq.gt_filename || null,
                     });
                 }
             }

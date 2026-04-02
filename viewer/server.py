@@ -38,18 +38,34 @@ async def index():
 
 @app.get("/api/sequences")
 async def list_sequences():
-    """List all available .npy sequence files."""
+    """List available sequences, pairing predictions with ground truth."""
     SEQUENCES_DIR.mkdir(parents=True, exist_ok=True)
     sequences = []
+    seen_gt = set()
+
     for f in sorted(SEQUENCES_DIR.glob("*.npy")):
+        # Skip ground truth files -- they appear as paired entries
+        if f.stem.endswith("_gt"):
+            seen_gt.add(f.stem)
+            continue
+
         data = np.load(str(f))
-        sequences.append({
+        gt_file = SEQUENCES_DIR / f"{f.stem}_gt.npy"
+        has_gt = gt_file.exists()
+
+        entry = {
             "name": f.stem,
             "filename": f.name,
             "frames": data.shape[0],
             "dims": data.shape[1] if data.ndim > 1 else 1,
             "duration_s": data.shape[0] / 30.0,
-        })
+            "has_gt": has_gt,
+        }
+        if has_gt:
+            entry["gt_filename"] = gt_file.name
+
+        sequences.append(entry)
+
     return {"sequences": sequences}
 
 

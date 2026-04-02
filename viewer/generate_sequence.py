@@ -177,8 +177,32 @@ def generate_from_model(
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     np.save(output_path, expressions.astype(np.float32))
-    print(f"Expression sequence saved: {output_path} (shape: {expressions.shape})")
-    print(f"Value range: [{expressions.min():.3f}, {expressions.max():.3f}]")
+    print(f"Prediction saved: {output_path} (shape: {expressions.shape})")
+    print(f"  Value range: [{expressions.min():.3f}, {expressions.max():.3f}]")
+
+    # Save matching ground truth from BEAT2 npz
+    audio_stem = Path(audio_path).stem  # e.g. "1_wayne_0_1_1"
+    beat2_dir = Path(config.paths.beat2_raw_dir)
+    npz_candidates = list(beat2_dir.rglob(f"{audio_stem}.npz"))
+    if npz_candidates:
+        npz_data = np.load(str(npz_candidates[0]), allow_pickle=True)
+        if "expressions" in npz_data:
+            gt = npz_data["expressions"].astype(np.float32)
+            # Trim to same length as prediction
+            min_len = min(gt.shape[0], expressions.shape[0])
+            gt = gt[:min_len]
+
+            gt_path = output_path.replace(".npy", "_gt.npy")
+            np.save(gt_path, gt)
+            print(f"Ground truth saved: {gt_path} (shape: {gt.shape})")
+            print(f"  Value range: [{gt.min():.3f}, {gt.max():.3f}]")
+
+            # Print comparison stats
+            pred_trimmed = expressions[:min_len]
+            l1 = np.abs(pred_trimmed - gt).mean()
+            print(f"  L1 error (pred vs GT): {l1:.4f}")
+    else:
+        print(f"  No matching ground truth npz found for {audio_stem}")
 
 
 def main():

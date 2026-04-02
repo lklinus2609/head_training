@@ -54,6 +54,19 @@
                 </div>
             </div>
 
+            <div class="panel-section" id="comparison-section" style="display:none;">
+                <h3>View Mode</h3>
+                <div class="controls-row">
+                    <button class="btn mode-active" id="btn-pred">Prediction</button>
+                    <button class="btn" id="btn-gt">Ground Truth</button>
+                    <button class="btn" id="btn-overlay">Overlay</button>
+                </div>
+                <div id="error-display">Frame L1: --</div>
+                <div id="error-bar-container">
+                    <canvas id="error-graph" height="40"></canvas>
+                </div>
+            </div>
+
             <div class="panel-section">
                 <h3>WebSocket Stream</h3>
                 <div class="controls-row">
