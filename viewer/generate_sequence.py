@@ -133,9 +133,8 @@ def generate_from_model(
     audio_padded = np.pad(audio_feats, ((C, F), (0, 0)), mode="edge")
     audio_tensor = torch.from_numpy(audio_padded).float().unsqueeze(0).to(device)
 
-    # Generate in chunks using teacher-forcing style (parallel within chunk)
-    # This avoids autoregressive drift by generating each chunk independently
-    # and only passing the last P frames as context to the next chunk.
+    # Autoregressive inference: generate one frame at a time.
+    # The model needs its own previous predictions as decoder input.
     all_expressions = []
     prev_expr = torch.zeros(1, P, config.data.flame_expr_dim, device=device)
     emotion_tensor = torch.tensor([emotion], device=device)
@@ -150,14 +149,9 @@ def generate_from_model(
             audio_end = audio_start + chunk_len + C + F
             audio_chunk = audio_tensor[:, audio_start:audio_end]
 
-            # Use a dummy target to trigger teacher-forcing path (parallel generation)
-            # Feed zeros as target -- the model uses prev_expr + causal self-attention
-            dummy_target = torch.zeros(1, chunk_len, config.data.flame_expr_dim, device=device)
-            pred = generator(audio_chunk, emotion_tensor, prev_expr, target_expression=dummy_target)
+            # Autoregressive: generate without teacher forcing
+            pred = generator(audio_chunk, emotion_tensor, prev_expr, target_expression=None)
             pred = pred[:, :chunk_len]
-
-            # Clamp output to reasonable range (prevent any residual drift)
-            pred = pred.clamp(-5.0, 5.0)
 
             all_expressions.append(pred.cpu())
 
