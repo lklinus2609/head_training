@@ -488,7 +488,8 @@ function wsConnect() {
 
     state.ws.onmessage = (event) => {
         const msg = JSON.parse(event.data);
-        if (msg.type === 'frame' && msg.weights) {
+        if (msg.type === 'frame' && msg.weights && !state.activeSequence) {
+            // Only apply WS frames when no local sequence is loaded
             applyWeights(msg.weights);
             state.currentFrame = msg.frame;
             updateFrameInfo();
@@ -617,8 +618,8 @@ function animate() {
         fpsTime = now;
     }
 
-    // Playback
-    if (state.playing && state.activeSequence && !state.wsConnected) {
+    // Playback (local file sequences)
+    if (state.playing && state.activeSequence) {
         const frameInterval = 1000 / (state.fps * state.speed);
         if (now - state.lastFrameTime >= frameInterval) {
             state.currentFrame++;
