@@ -24,25 +24,14 @@ import pickle
 
 
 def load_flame_model(flame_path: str) -> dict:
-    """Load the FLAME model from a pickle file, handling chumpy dependencies.
+    """Load the FLAME model from a pickle file.
 
-    Uses numpy's encoding trick: reads the pickle bytes, replaces all
-    chumpy module references with numpy equivalents, then unpickles.
+    Requires chumpy to be installed (the FLAME pickle contains chumpy.Ch objects).
     """
-    import re
-
     with open(flame_path, "rb") as f:
-        data = f.read()
+        model = pickle.load(f, encoding="latin1")
 
-    # Replace chumpy module references in the pickle byte stream
-    # Pickle stores module/class names as strings. We replace chumpy.ch.Ch
-    # and chumpy.Ch with numpy.ndarray so pickle reconstructs numpy arrays.
-    data = data.replace(b"chumpy.ch\nCh\n", b"numpy\nndarray\n")
-    data = data.replace(b"chumpy\nCh\n", b"numpy\nndarray\n")
-
-    model = pickle.loads(data, encoding="latin1")
-
-    # Convert any non-numpy arrays to numpy
+    # Convert chumpy arrays to numpy
     result = {}
     for key, val in model.items():
         try:

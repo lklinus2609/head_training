@@ -12,12 +12,9 @@ import torch
 
 
 def _load_flame_pickle(flame_path: str) -> dict:
-    """Load FLAME pickle, replacing chumpy references in the byte stream."""
+    """Load FLAME pickle. Requires chumpy to be installed."""
     with open(flame_path, "rb") as f:
-        data = f.read()
-    data = data.replace(b"chumpy.ch\nCh\n", b"numpy\nndarray\n")
-    data = data.replace(b"chumpy\nCh\n", b"numpy\nndarray\n")
-    model = pickle.loads(data, encoding="latin1")
+        model = pickle.load(f, encoding="latin1")
     return {k: np.array(v) if hasattr(v, "__array__") else v for k, v in model.items()}
 
 
