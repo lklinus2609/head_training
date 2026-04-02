@@ -512,6 +512,8 @@ function wsDisconnect() {
         state.ws.close();
         state.ws = null;
     }
+    state.wsConnected = false;
+    document.getElementById('ws-indicator').className = 'ws-status disconnected';
 }
 
 // ============================================================
