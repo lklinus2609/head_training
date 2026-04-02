@@ -108,7 +108,21 @@ def generate_from_model(
                                        model_name=config.data.wav2vec_model,
                                        device=str(device))
 
-    # Run inference in chunks
+    # Load normalization stats from the processed dataset
+    import h5py
+    stats_path = Path(config.paths.processed_dir) / "train.h5"
+    expr_mean = expr_std = None
+    if stats_path.exists():
+        with h5py.File(str(stats_path), "r") as hf:
+            if "stats" in hf:
+                expr_mean = torch.from_numpy(hf["stats"]["expr_mean"][:]).float().to(device)
+                expr_std = torch.from_numpy(hf["stats"]["expr_std"][:]).float().to(device)
+                expr_std = torch.where(expr_std < 1e-8, torch.ones_like(expr_std), expr_std)
+                print(f"Loaded normalization stats from {stats_path}")
+
+    # Normalize audio features (the model was trained on normalized expression data,
+    # but audio features were not normalized in the dataset -- they go in raw)
+
     T = audio_feats.shape[0]
     seq_len = config.data.seq_len
     C = config.data.context_past
@@ -119,7 +133,9 @@ def generate_from_model(
     audio_padded = np.pad(audio_feats, ((C, F), (0, 0)), mode="edge")
     audio_tensor = torch.from_numpy(audio_padded).float().unsqueeze(0).to(device)
 
-    # Generate autoregressively in chunks
+    # Generate in chunks using teacher-forcing style (parallel within chunk)
+    # This avoids autoregressive drift by generating each chunk independently
+    # and only passing the last P frames as context to the next chunk.
     all_expressions = []
     prev_expr = torch.zeros(1, P, config.data.flame_expr_dim, device=device)
     emotion_tensor = torch.tensor([emotion], device=device)
@@ -130,27 +146,39 @@ def generate_from_model(
             chunk_len = end - start
 
             # Audio context for this chunk
-            audio_start = start  # Already includes C offset from padding
+            audio_start = start
             audio_end = audio_start + chunk_len + C + F
             audio_chunk = audio_tensor[:, audio_start:audio_end]
 
-            # Autoregressive generation (no teacher forcing)
-            pred = generator(audio_chunk, emotion_tensor, prev_expr, target_expression=None)
-            pred = pred[:, :chunk_len]  # Trim to actual chunk length
+            # Use a dummy target to trigger teacher-forcing path (parallel generation)
+            # Feed zeros as target -- the model uses prev_expr + causal self-attention
+            dummy_target = torch.zeros(1, chunk_len, config.data.flame_expr_dim, device=device)
+            pred = generator(audio_chunk, emotion_tensor, prev_expr, target_expression=dummy_target)
+            pred = pred[:, :chunk_len]
 
-            all_expressions.append(pred.cpu().numpy())
+            # Clamp output to reasonable range (prevent any residual drift)
+            pred = pred.clamp(-5.0, 5.0)
 
-            # Update prev_expr for next chunk
+            all_expressions.append(pred.cpu())
+
+            # Pass last P frames as context for next chunk
             if pred.shape[1] >= P:
                 prev_expr = pred[:, -P:]
             else:
                 prev_expr = pred
 
-    expressions = np.concatenate(all_expressions, axis=1)[0]  # [T, 100]
+    expressions = torch.cat(all_expressions, dim=1)[0]  # [T, 100]
+
+    # Denormalize if we have stats (model outputs normalized values)
+    if expr_mean is not None and expr_std is not None:
+        expressions = expressions.cpu() * expr_std.cpu() + expr_mean.cpu()
+
+    expressions = expressions.numpy()
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     np.save(output_path, expressions.astype(np.float32))
     print(f"Expression sequence saved: {output_path} (shape: {expressions.shape})")
+    print(f"Value range: [{expressions.min():.3f}, {expressions.max():.3f}]")
 
 
 def main():
