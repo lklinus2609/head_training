@@ -80,6 +80,63 @@ class Stage3Trainer:
         windows = torch.cat(windows, dim=0)  # [B * num_windows, K, D_total]
         return windows
 
+    def _short_horizon_forward(self, expression, audio, emotion, prev_expr):
+        """Batched short-horizon prediction: predict H frames at a time using GT context.
+
+        Eliminates the teacher-forcing mismatch by using the same prediction mode
+        as autoregressive inference (target_expression=None).
+
+        Args:
+            expression: Ground truth expression [B, T, D].
+            audio: Audio features with context [B, C+T+F, audio_dim].
+            emotion: Emotion labels [B].
+            prev_expr: Previous expression frames [B, P, D].
+
+        Returns:
+            (predictions, targets): each [B, N*H, D] where N = T // H.
+        """
+        B, T, D = expression.shape
+        C = self.config.data.context_past
+        F = self.config.data.context_future
+        P = self.config.data.prev_frames
+        H = self.config.stage3.gen_horizon
+
+        # Concatenate prev context and expression for easy window extraction
+        # full_expr[:, t:t+P] gives the P GT frames before position t
+        full_expr = torch.cat([prev_expr, expression], dim=1)  # [B, P+T, D]
+
+        # Collect windows for all positions with stride H
+        positions = list(range(0, T - H + 1, H))
+        N = len(positions)
+        audio_len = C + H + F
+
+        # Extract prev_expression and audio windows for each position
+        prev_list = []
+        audio_list = []
+        target_list = []
+        for t in positions:
+            prev_list.append(full_expr[:, t:t + P])           # [B, P, D]
+            audio_list.append(audio[:, t:t + audio_len])       # [B, C+H+F, audio_dim]
+            target_list.append(expression[:, t:t + H])         # [B, H, D]
+
+        # Stack and reshape into a single large batch [B*N, ...]
+        prev_windows = torch.stack(prev_list, dim=1).reshape(B * N, P, D)
+        audio_windows = torch.stack(audio_list, dim=1).reshape(B * N, audio_len, -1)
+        emotion_expanded = emotion.unsqueeze(1).expand(-1, N).reshape(B * N)
+        targets = torch.stack(target_list, dim=1).reshape(B * N, H, D)
+
+        # Forward pass: predict H frames per window (no teacher forcing)
+        with torch.cuda.amp.autocast():
+            preds = self.generator(
+                audio_windows, emotion_expanded, prev_windows,
+                target_expression=None, max_len=H,
+            )  # [B*N, H, D]
+
+        # Reshape back to [B, N*H, D]
+        preds = preds.reshape(B, N * H, D)
+        targets = targets.reshape(B, N * H, D)
+        return preds, targets
+
     def _compute_disc_windows_from_generated(
         self, pred_expression, batch, window_size: int
     ):
@@ -156,16 +213,16 @@ class Stage3Trainer:
                 self.disc_scaler.update()
 
             # === Generator step ===
+            # Pass 1: Teacher forcing for adversarial loss (needs full sequences for disc windows)
             with torch.cuda.amp.autocast():
-                pred_expr = self.generator(audio, emotion, prev_expr, target_expression=expression)
-
-                # Reconstruction loss
-                recon_loss = l1_reconstruction_loss(pred_expr, expression)
-
-                # Adversarial loss
-                fake_windows = self._compute_disc_windows_from_generated(pred_expr, batch, K)
+                pred_expr_tf = self.generator(audio, emotion, prev_expr, target_expression=expression)
+                fake_windows = self._compute_disc_windows_from_generated(pred_expr_tf, batch, K)
                 fake_score = self.discriminator(fake_windows)
                 adv_loss = generator_adversarial_loss(fake_score)
+
+            # Pass 2: Short-horizon for reconstruction loss (matches inference)
+            pred_sh, target_sh = self._short_horizon_forward(expression, audio, emotion, prev_expr)
+            recon_loss = l1_reconstruction_loss(pred_sh, target_sh)
 
             # Combined generator loss
             lambda_adv = get_lambda_adv(

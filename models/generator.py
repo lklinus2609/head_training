@@ -196,8 +196,9 @@ class Generator(nn.Module):
             # Take last position output
             pred = self.output_head(x[:, -1:])  # [B, 1, expr_dim]
 
-            # Clamp to prevent drift
-            pred = pred.clamp(-8.0, 8.0)
+            # Clamp to prevent drift (only at inference; avoids flat gradients during training)
+            if not self.training:
+                pred = pred.clamp(-8.0, 8.0)
             generated.append(pred)
 
             # Project predicted frame and add positional encoding for position t+1
