@@ -20,7 +20,7 @@ data:
   seq_len: 60
   disc_window: 5
   dev_speakers: ["2", "4", "6", "8"]
-  num_workers: 4
+  num_workers: 5
   pin_memory: true
 
 generator:

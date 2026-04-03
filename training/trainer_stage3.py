@@ -42,6 +42,8 @@ class Stage3Trainer:
         self.wandb_run = wandb_run
         self.global_step = 0
         self.best_val_loss = float("inf")
+        self.gen_scaler = torch.cuda.amp.GradScaler()
+        self.disc_scaler = torch.cuda.amp.GradScaler()
 
     def _make_disc_windows(
         self, expression, velocity, acceleration, audio, window_size: int
@@ -131,31 +133,39 @@ class Stage3Trainer:
                 real_windows = self._make_disc_windows(expression, velocity, acceleration, audio, K)
 
                 # Generated expressions
-                with torch.no_grad():
+                with torch.no_grad(), torch.cuda.amp.autocast():
                     pred_expr = self.generator(audio, emotion, prev_expr, target_expression=expression)
                 fake_windows = self._compute_disc_windows_from_generated(pred_expr, batch, K)
 
-                real_score = self.discriminator(real_windows)
-                fake_score = self.discriminator(fake_windows.detach())
+                with torch.cuda.amp.autocast():
+                    real_score = self.discriminator(real_windows)
+                    fake_score = self.discriminator(fake_windows.detach())
+                    d_loss = discriminator_loss(real_score, fake_score)
 
-                d_loss = discriminator_loss(real_score, fake_score)
-                gp = gradient_penalty(self.discriminator, real_windows, fake_windows.detach())
+                # GP in float32 (numerically sensitive, already uses math kernel)
+                gp = gradient_penalty(self.discriminator, real_windows.float(), fake_windows.detach().float())
                 total_d_loss = d_loss + self.config.discriminator.gp_weight * gp
 
                 self.disc_optimizer.zero_grad()
-                total_d_loss.backward()
-                self.disc_optimizer.step()
+                self.disc_scaler.scale(total_d_loss).backward()
+                self.disc_scaler.unscale_(self.disc_optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    self.discriminator.parameters(), self.config.stage3.grad_clip
+                )
+                self.disc_scaler.step(self.disc_optimizer)
+                self.disc_scaler.update()
 
             # === Generator step ===
-            pred_expr = self.generator(audio, emotion, prev_expr, target_expression=expression)
+            with torch.cuda.amp.autocast():
+                pred_expr = self.generator(audio, emotion, prev_expr, target_expression=expression)
 
-            # Reconstruction loss
-            recon_loss = l1_reconstruction_loss(pred_expr, expression)
+                # Reconstruction loss
+                recon_loss = l1_reconstruction_loss(pred_expr, expression)
 
-            # Adversarial loss
-            fake_windows = self._compute_disc_windows_from_generated(pred_expr, batch, K)
-            fake_score = self.discriminator(fake_windows)
-            adv_loss = generator_adversarial_loss(fake_score)
+                # Adversarial loss
+                fake_windows = self._compute_disc_windows_from_generated(pred_expr, batch, K)
+                fake_score = self.discriminator(fake_windows)
+                adv_loss = generator_adversarial_loss(fake_score)
 
             # Combined generator loss
             lambda_adv = get_lambda_adv(
@@ -167,11 +177,13 @@ class Stage3Trainer:
             g_loss = recon_loss + lambda_adv * adv_loss
 
             self.gen_optimizer.zero_grad()
-            g_loss.backward()
+            self.gen_scaler.scale(g_loss).backward()
+            self.gen_scaler.unscale_(self.gen_optimizer)
             torch.nn.utils.clip_grad_norm_(
                 self.generator.parameters(), self.config.stage3.grad_clip
             )
-            self.gen_optimizer.step()
+            self.gen_scaler.step(self.gen_optimizer)
+            self.gen_scaler.update()
 
             # Track metrics
             totals["d_loss"] += d_loss.item()
