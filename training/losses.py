@@ -5,14 +5,24 @@ import torch.nn.functional as F
 from torch import autograd
 
 
-def l1_reconstruction_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def l1_reconstruction_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    dim_weights: torch.Tensor | None = None,
+) -> torch.Tensor:
     """L1 reconstruction loss between predicted and target FLAME expressions.
 
     Args:
         pred: Predicted expressions [B, T, D].
         target: Ground truth expressions [B, T, D].
+        dim_weights: Per-dimension weights [D], typically raw std normalized
+            to mean 1.0. If None, uses uniform weighting.
     """
-    return F.l1_loss(pred, target)
+    if dim_weights is None:
+        return F.l1_loss(pred, target)
+    per_dim_loss = torch.abs(pred - target)  # [B, T, D]
+    weighted = per_dim_loss * dim_weights  # [D] broadcasts over [B, T, D]
+    return weighted.mean()
 
 
 def discriminator_loss(

@@ -30,6 +30,7 @@ class Stage3Trainer:
         val_loader,
         device,
         wandb_run=None,
+        dim_weights=None,
     ):
         self.config = config
         self.generator = generator
@@ -40,6 +41,7 @@ class Stage3Trainer:
         self.val_loader = val_loader
         self.device = device
         self.wandb_run = wandb_run
+        self.dim_weights = dim_weights
         self.global_step = 0
         self.best_val_loss = float("inf")
         self.gen_scaler = torch.cuda.amp.GradScaler()
@@ -222,7 +224,7 @@ class Stage3Trainer:
 
             # Pass 2: Short-horizon for reconstruction loss (matches inference)
             pred_sh, target_sh = self._short_horizon_forward(expression, audio, emotion, prev_expr)
-            recon_loss = l1_reconstruction_loss(pred_sh, target_sh)
+            recon_loss = l1_reconstruction_loss(pred_sh, target_sh, self.dim_weights)
 
             # Combined generator loss
             lambda_adv = get_lambda_adv(
@@ -301,7 +303,7 @@ class Stage3Trainer:
             prev_expr = batch["prev_expression"].to(self.device)
 
             pred = self.generator(audio, emotion, prev_expr, target_expression=expression)
-            recon = l1_reconstruction_loss(pred, expression)
+            recon = l1_reconstruction_loss(pred, expression, self.dim_weights)
             mse = F.mse_loss(pred, expression)
 
             total_recon += recon.item()

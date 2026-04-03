@@ -21,6 +21,7 @@ class Stage2Trainer:
         val_loader,
         device,
         wandb_run=None,
+        dim_weights=None,
     ):
         self.config = config
         self.generator = generator
@@ -29,6 +30,7 @@ class Stage2Trainer:
         self.val_loader = val_loader
         self.device = device
         self.wandb_run = wandb_run
+        self.dim_weights = dim_weights
         self.global_step = 0
         self.best_val_loss = float("inf")
 
@@ -52,7 +54,7 @@ class Stage2Trainer:
 
             # Forward pass with teacher forcing
             pred = self.generator(audio, emotion, prev_expr, target_expression=expression)
-            loss = l1_reconstruction_loss(pred, expression)
+            loss = l1_reconstruction_loss(pred, expression, self.dim_weights)
 
             # Backward pass
             self.optimizer.zero_grad()
@@ -94,7 +96,7 @@ class Stage2Trainer:
             prev_expr = batch["prev_expression"].to(self.device)
 
             pred = self.generator(audio, emotion, prev_expr, target_expression=expression)
-            loss = l1_reconstruction_loss(pred, expression)
+            loss = l1_reconstruction_loss(pred, expression, self.dim_weights)
             mse = torch.nn.functional.mse_loss(pred, expression)
 
             total_loss += loss.item()

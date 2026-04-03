@@ -180,6 +180,14 @@ def main():
         )
         start_epoch = ckpt["epoch"] + 1
 
+    # Compute variance-weighted dimension weights from training stats
+    dim_weights = None
+    if "expr_std" in train_dataset.stats:
+        expr_std = torch.from_numpy(train_dataset.stats["expr_std"]).float().to(device)
+        dim_weights = expr_std / expr_std.mean()  # normalize to average 1.0
+        if is_main_process():
+            print(f"Dim weights range: [{dim_weights.min():.3f}, {dim_weights.max():.3f}]")
+
     # Training loop
     trainer = Stage3Trainer(
         config=config,
@@ -191,6 +199,7 @@ def main():
         val_loader=val_loader,
         device=device,
         wandb_run=wandb_run,
+        dim_weights=dim_weights,
     )
 
     for epoch in range(start_epoch, config.stage3.epochs):
