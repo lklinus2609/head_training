@@ -150,8 +150,7 @@ def generate_from_model(
             audio_chunk = audio_tensor[:, audio_start:audio_end]
 
             # Autoregressive: generate without teacher forcing
-            pred = generator(audio_chunk, emotion_tensor, prev_expr, target_expression=None)
-            pred = pred[:, :chunk_len]
+            pred = generator(audio_chunk, emotion_tensor, prev_expr, target_expression=None, max_len=chunk_len)
 
             all_expressions.append(pred.cpu())
 

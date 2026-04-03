@@ -88,6 +88,7 @@ class Generator(nn.Module):
         emotion: torch.Tensor,
         prev_expression: torch.Tensor,
         target_expression: torch.Tensor | None = None,
+        max_len: int | None = None,
     ) -> torch.Tensor:
         """Forward pass with teacher forcing.
 
@@ -97,6 +98,7 @@ class Generator(nn.Module):
             prev_expression: Previous P expression frames [B, P, expr_dim].
             target_expression: Ground truth expression for teacher forcing [B, T, expr_dim].
                 If None, runs autoregressive inference.
+            max_len: Number of frames to generate in autoregressive mode.
 
         Returns:
             Predicted expression parameters [B, T, expr_dim].
@@ -118,7 +120,7 @@ class Generator(nn.Module):
         else:
             # Autoregressive inference
             return self._forward_autoregressive(
-                audio_enc, emotion_emb, prev_expression, device
+                audio_enc, emotion_emb, prev_expression, device, max_len=max_len
             )
 
     def _forward_teacher_forcing(
@@ -164,26 +166,26 @@ class Generator(nn.Module):
         emotion_emb: torch.Tensor,
         prev_expression: torch.Tensor,
         device: torch.device,
+        max_len: int | None = None,
     ) -> torch.Tensor:
         """Autoregressive inference: predict one frame at a time."""
         B = audio_enc.size(0)
 
         # Start with prev_expression context
         prev_flat = prev_expression.reshape(B, -1)
-        prev_token = self.prev_proj(prev_flat)  # [B, d_model]
+        prev_token = self.prev_proj(prev_flat).unsqueeze(1)  # [B, 1, d_model]
 
-        # Determine sequence length from audio encoding
-        # audio_enc has length = context_past + seq_len + context_future
-        # We infer seq_len as a reasonable default
-        T = audio_enc.size(1)
+        # Apply positional encoding to the initial token once
+        prev_token_pe = prev_token + self.pos_enc.pe[:, 0:1]
+
+        T = max_len if max_len is not None else audio_enc.size(1)
 
         generated = []
-        tokens = [prev_token.unsqueeze(1)]  # Start with prev context
+        # Store tokens with PE already applied
+        tokens_with_pe = [prev_token_pe]
 
         for t in range(T):
-            # Build current sequence
-            seq = torch.cat(tokens, dim=1)  # [B, t+1, d_model]
-            seq = self.pos_enc(seq)
+            seq = torch.cat(tokens_with_pe, dim=1)  # [B, t+1, d_model]
 
             causal_mask = generate_causal_mask(seq.size(1), device)
 
@@ -193,10 +195,14 @@ class Generator(nn.Module):
 
             # Take last position output
             pred = self.output_head(x[:, -1:])  # [B, 1, expr_dim]
+
+            # Clamp to prevent drift
+            pred = pred.clamp(-8.0, 8.0)
             generated.append(pred)
 
-            # Project predicted frame for next step input
+            # Project predicted frame and add positional encoding for position t+1
             next_token = self.expr_proj(pred)  # [B, 1, d_model]
-            tokens.append(next_token)
+            next_token_pe = next_token + self.pos_enc.pe[:, t + 1 : t + 2]
+            tokens_with_pe.append(next_token_pe)
 
         return torch.cat(generated, dim=1)  # [B, T, expr_dim]
