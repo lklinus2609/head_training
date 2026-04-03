@@ -52,6 +52,8 @@ async def list_sequences():
         data = np.load(str(f))
         gt_file = SEQUENCES_DIR / f"{f.stem}_gt.npy"
         has_gt = gt_file.exists()
+        wav_file = SEQUENCES_DIR / f"{f.stem}.wav"
+        has_audio = wav_file.exists()
 
         entry = {
             "name": f.stem,
@@ -60,9 +62,12 @@ async def list_sequences():
             "dims": data.shape[1] if data.ndim > 1 else 1,
             "duration_s": data.shape[0] / 30.0,
             "has_gt": has_gt,
+            "has_audio": has_audio,
         }
         if has_gt:
             entry["gt_filename"] = gt_file.name
+        if has_audio:
+            entry["audio_filename"] = wav_file.name
 
         sequences.append(entry)
 

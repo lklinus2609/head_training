@@ -28,6 +28,11 @@ const state = {
     fps: 30,
     lastFrameTime: 0,
 
+    // Audio
+    audio: null,
+    audioLoaded: false,
+    audioAvailable: false,
+
     // WebSocket
     ws: null,
     wsConnected: false,
@@ -280,9 +285,21 @@ function selectSequence(name) {
     state.playing = false;
     state.viewMode = 'prediction';
 
+    // Unload previous audio
+    unloadAudio();
+
     if (state.activeSequence) {
         document.getElementById('timeline').max = state.activeSequence.frames - 1;
         document.getElementById('timeline').value = 0;
+
+        // Load audio if available
+        if (state.activeSequence.has_audio && state.activeSequence.audio_filename) {
+            state.audioAvailable = true;
+            loadAudio(state.activeSequence.audio_filename);
+        } else {
+            state.audioAvailable = false;
+            updateAudioUI();
+        }
 
         // Load ground truth if available
         if (state.activeSequence.has_gt && state.activeSequence.gt_filename) {
@@ -601,6 +618,80 @@ function setStatus(msg) {
 }
 
 // ============================================================
+// Audio Sync
+// ============================================================
+function loadAudio(audioFilename) {
+    unloadAudio();
+    state.audio = new Audio(`/static/sequences/${audioFilename}`);
+    state.audio.loop = false;
+    state.audio.volume = parseFloat(document.getElementById('volume-slider').value);
+
+    const statusEl = document.getElementById('audio-status');
+    statusEl.textContent = 'Loading audio...';
+    statusEl.className = 'audio-indicator loading';
+
+    state.audio.addEventListener('canplaythrough', () => {
+        state.audioLoaded = true;
+        statusEl.textContent = 'Audio ready';
+        statusEl.className = 'audio-indicator ready';
+    }, { once: true });
+
+    state.audio.addEventListener('error', () => {
+        state.audioLoaded = false;
+        statusEl.textContent = 'Audio error';
+        statusEl.className = 'audio-indicator no-audio';
+    });
+
+    state.audio.load();
+}
+
+function unloadAudio() {
+    if (state.audio) {
+        state.audio.pause();
+        state.audio.src = '';
+        state.audio = null;
+    }
+    state.audioLoaded = false;
+    state.audioAvailable = false;
+    updateAudioUI();
+}
+
+function startAudio() {
+    if (!state.audio || !state.audioLoaded) return;
+    state.audio.currentTime = state.currentFrame / state.fps;
+    state.audio.playbackRate = state.speed;
+    state.audio.play().catch(() => {});
+}
+
+function pauseAudio() {
+    if (state.audio && !state.audio.paused) {
+        state.audio.pause();
+    }
+}
+
+function resetAudio() {
+    if (state.audio) {
+        state.audio.pause();
+        state.audio.currentTime = 0;
+    }
+}
+
+function syncAudioToFrame() {
+    if (state.audio && state.audioLoaded) {
+        state.audio.currentTime = state.currentFrame / state.fps;
+    }
+}
+
+function updateAudioUI() {
+    const statusEl = document.getElementById('audio-status');
+    if (!statusEl) return;
+    if (!state.audioAvailable) {
+        statusEl.textContent = 'No audio';
+        statusEl.className = 'audio-indicator no-audio';
+    }
+}
+
+// ============================================================
 // Animation Loop
 // ============================================================
 let fpsFrames = 0;
@@ -620,16 +711,31 @@ function animate() {
 
     // Playback (local file sequences)
     if (state.playing && state.activeSequence) {
-        const frameInterval = 1000 / (state.fps * state.speed);
-        if (now - state.lastFrameTime >= frameInterval) {
-            state.currentFrame++;
-            if (state.currentFrame >= state.activeSequence.frames) {
+        if (state.audioLoaded && state.audio && !state.audio.paused) {
+            // Audio-driven: derive frame from audio's currentTime
+            const audioFrame = Math.floor(state.audio.currentTime * state.fps);
+            if (audioFrame >= state.activeSequence.frames) {
+                state.audio.currentTime = 0;
                 state.currentFrame = 0;
+            } else {
+                state.currentFrame = audioFrame;
             }
             const weights = getFrameWeights(state.currentFrame);
             if (weights) applyWeights(weights);
             updateFrameInfo();
-            state.lastFrameTime = now;
+        } else {
+            // Fallback: time-based frame counting (no audio)
+            const frameInterval = 1000 / (state.fps * state.speed);
+            if (now - state.lastFrameTime >= frameInterval) {
+                state.currentFrame++;
+                if (state.currentFrame >= state.activeSequence.frames) {
+                    state.currentFrame = 0;
+                }
+                const weights = getFrameWeights(state.currentFrame);
+                if (weights) applyWeights(weights);
+                updateFrameInfo();
+                state.lastFrameTime = now;
+            }
         }
     }
 
@@ -681,9 +787,11 @@ function setupEvents() {
     document.getElementById('btn-play').addEventListener('click', () => {
         state.playing = true;
         state.lastFrameTime = performance.now();
+        startAudio();
     });
     document.getElementById('btn-pause').addEventListener('click', () => {
         state.playing = false;
+        pauseAudio();
     });
     document.getElementById('btn-reset').addEventListener('click', () => {
         state.currentFrame = 0;
@@ -691,6 +799,7 @@ function setupEvents() {
         const weights = getFrameWeights(0);
         if (weights) applyWeights(weights);
         updateFrameInfo();
+        resetAudio();
     });
 
     document.getElementById('timeline').addEventListener('input', e => {
@@ -698,11 +807,19 @@ function setupEvents() {
         const weights = getFrameWeights(state.currentFrame);
         if (weights) applyWeights(weights);
         updateFrameInfo();
+        syncAudioToFrame();
     });
 
     document.getElementById('speed-slider').addEventListener('input', e => {
         state.speed = parseFloat(e.target.value);
         document.getElementById('speed-value').textContent = state.speed.toFixed(1) + 'x';
+        if (state.audio) state.audio.playbackRate = state.speed;
+    });
+
+    document.getElementById('volume-slider').addEventListener('input', e => {
+        const vol = parseFloat(e.target.value);
+        document.getElementById('volume-value').textContent = Math.round(vol * 100) + '%';
+        if (state.audio) state.audio.volume = vol;
     });
 
     // View mode buttons
@@ -721,22 +838,26 @@ function setupEvents() {
             e.preventDefault();
             state.playing = !state.playing;
             state.lastFrameTime = performance.now();
+            if (state.playing) startAudio(); else pauseAudio();
         } else if (e.code === 'ArrowRight') {
             state.currentFrame = Math.min(state.currentFrame + 1, (state.activeSequence?.frames || 1) - 1);
             const weights = getFrameWeights(state.currentFrame);
             if (weights) applyWeights(weights);
             updateFrameInfo();
+            syncAudioToFrame();
         } else if (e.code === 'ArrowLeft') {
             state.currentFrame = Math.max(state.currentFrame - 1, 0);
             const weights = getFrameWeights(state.currentFrame);
             if (weights) applyWeights(weights);
             updateFrameInfo();
+            syncAudioToFrame();
         } else if (e.code === 'KeyR') {
             state.currentFrame = 0;
             state.playing = false;
             const weights = getFrameWeights(0);
             if (weights) applyWeights(weights);
             updateFrameInfo();
+            resetAudio();
         } else if (e.code === 'Digit1') {
             setViewMode('prediction');
         } else if (e.code === 'Digit2') {
@@ -780,6 +901,8 @@ async function tryAutoLoad() {
                         dims: cols,
                         has_gt: seq.has_gt || false,
                         gt_filename: seq.gt_filename || null,
+                        has_audio: seq.has_audio || false,
+                        audio_filename: seq.audio_filename || null,
                     });
                 }
             }

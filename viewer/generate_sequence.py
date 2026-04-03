@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -196,6 +197,14 @@ def generate_from_model(
             print(f"  L1 error (pred vs GT): {l1:.4f}")
     else:
         print(f"  No matching ground truth npz found for {audio_stem}")
+
+    # Copy source audio alongside the sequence for the web viewer
+    wav_dest = output_path.replace(".npy", ".wav")
+    try:
+        shutil.copy2(audio_path, wav_dest)
+        print(f"Audio copied: {wav_dest}")
+    except Exception as e:
+        print(f"Warning: could not copy audio: {e}")
 
 
 def main():

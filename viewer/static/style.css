@@ -295,3 +295,45 @@ body {
     background: #3a3a5a;
     color: #888;
 }
+
+/* Audio controls */
+.audio-control {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid #2a2a4a;
+}
+
+.volume-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    margin-top: 6px;
+}
+
+.volume-control input {
+    width: 80px;
+    accent-color: #4a90d9;
+}
+
+.audio-indicator {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-family: monospace;
+}
+
+.audio-indicator.no-audio {
+    color: #666;
+    background: #2a2a4a;
+}
+
+.audio-indicator.loading {
+    color: #e0c040;
+    background: #3a3a20;
+}
+
+.audio-indicator.ready {
+    color: #6cbf6c;
+    background: #2a3a2a;
+}
