@@ -50,7 +50,10 @@ def gradient_penalty(
     interpolated = (alpha * real_data + (1 - alpha) * fake_data).detach()
     interpolated.requires_grad_(True)
 
-    score = discriminator(interpolated)
+    # Force math-based attention kernel because SDPA efficient/flash kernels
+    # do not support second-order gradients needed by gradient penalty.
+    with torch.backends.cuda.sdp_kernel(enable_flash=False, enable_mem_efficient=False, enable_math=True):
+        score = discriminator(interpolated)
     grad = autograd.grad(
         outputs=score,
         inputs=interpolated,
