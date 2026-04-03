@@ -6,7 +6,7 @@ stage3:
   gen_lr: 5.0e-5
   gen_beta1: 0.5
   gen_beta2: 0.999
-  disc_lr: 2.0e-4
+  disc_lr: 1.0e-4
   disc_beta1: 0.5
   disc_beta2: 0.999
   weight_decay: 1.0e-5
