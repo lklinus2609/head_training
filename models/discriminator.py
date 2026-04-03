@@ -62,7 +62,6 @@ class TemporalDiscriminator(nn.Module):
             nn.Linear(d_model, fc_hidden),
             nn.LeakyReLU(0.2),
             nn.Linear(fc_hidden, 1),
-            nn.Sigmoid(),
         )
 
         self._init_weights()

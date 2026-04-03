@@ -25,8 +25,8 @@ def discriminator_loss(
         real_score: Discriminator output for real data [B, 1].
         fake_score: Discriminator output for generated data [B, 1].
     """
-    real_loss = F.binary_cross_entropy(real_score, torch.ones_like(real_score))
-    fake_loss = F.binary_cross_entropy(fake_score, torch.zeros_like(fake_score))
+    real_loss = F.binary_cross_entropy_with_logits(real_score, torch.ones_like(real_score))
+    fake_loss = F.binary_cross_entropy_with_logits(fake_score, torch.zeros_like(fake_score))
     return (real_loss + fake_loss) / 2
 
 
@@ -75,4 +75,4 @@ def generator_adversarial_loss(fake_score: torch.Tensor) -> torch.Tensor:
     Args:
         fake_score: Discriminator output for generated data [B, 1].
     """
-    return F.binary_cross_entropy(fake_score, torch.ones_like(fake_score))
+    return F.binary_cross_entropy_with_logits(fake_score, torch.ones_like(fake_score))

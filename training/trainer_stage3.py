@@ -203,8 +203,8 @@ class Stage3Trainer:
                 )
 
                 if self.global_step % 50 == 0:
-                    d_real_acc = (real_score > 0.5).float().mean().item()
-                    d_fake_acc = (fake_score < 0.5).float().mean().item()
+                    d_real_acc = (real_score > 0.0).float().mean().item()
+                    d_fake_acc = (fake_score < 0.0).float().mean().item()
                     log_metrics(
                         {
                             "stage3/d_loss": d_loss.item(),
