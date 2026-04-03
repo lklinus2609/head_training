@@ -2,7 +2,7 @@ _base_: base.yaml
 
 stage2:
   epochs: 100
-  batch_size: 256
+  batch_size: 1024
   lr: 1.0e-4
   beta1: 0.9
   beta2: 0.999
