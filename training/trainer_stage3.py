@@ -259,7 +259,7 @@ class Stage3Trainer:
                     lam=f"{lambda_adv:.4f}",
                 )
 
-                if self.global_step % 50 == 0:
+                if self.global_step % 10 == 0:
                     d_real_acc = (real_score > 0.0).float().mean().item()
                     d_fake_acc = (fake_score < 0.0).float().mean().item()
                     log_metrics(
