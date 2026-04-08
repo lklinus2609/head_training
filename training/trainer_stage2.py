@@ -34,6 +34,60 @@ class Stage2Trainer:
         self.global_step = 0
         self.best_val_loss = float("inf")
 
+    def _short_horizon_forward(self, expression, audio, emotion, prev_expr):
+        """Batched short-horizon prediction: predict H frames at a time using GT context.
+
+        Eliminates the teacher-forcing mismatch by using the same prediction mode
+        as autoregressive inference (target_expression=None).
+
+        Args:
+            expression: Ground truth expression [B, T, D].
+            audio: Audio features with context [B, C+T+F, audio_dim].
+            emotion: Emotion labels [B].
+            prev_expr: Previous expression frames [B, P, D].
+
+        Returns:
+            (predictions, targets): each [B, N*H, D] where N = T // H.
+        """
+        B, T, D = expression.shape
+        C = self.config.data.context_past
+        F = self.config.data.context_future
+        P = self.config.data.prev_frames
+        H = self.config.stage2.gen_horizon
+
+        # Concatenate prev context and expression for easy window extraction
+        full_expr = torch.cat([prev_expr, expression], dim=1)  # [B, P+T, D]
+
+        # Collect windows for all positions with stride H
+        positions = list(range(0, T - H + 1, H))
+        N = len(positions)
+        audio_len = C + H + F
+
+        prev_list = []
+        audio_list = []
+        target_list = []
+        for t in positions:
+            prev_list.append(full_expr[:, t:t + P])
+            audio_list.append(audio[:, t:t + audio_len])
+            target_list.append(expression[:, t:t + H])
+
+        # Stack and reshape into a single large batch [B*N, ...]
+        prev_windows = torch.stack(prev_list, dim=1).reshape(B * N, P, D)
+        audio_windows = torch.stack(audio_list, dim=1).reshape(B * N, audio_len, -1)
+        emotion_expanded = emotion.unsqueeze(1).expand(-1, N).reshape(B * N)
+        targets = torch.stack(target_list, dim=1).reshape(B * N, H, D)
+
+        # Forward pass: predict H frames per window (no teacher forcing)
+        preds = self.generator(
+            audio_windows, emotion_expanded, prev_windows,
+            target_expression=None, max_len=H,
+        )  # [B*N, H, D]
+
+        # Reshape back to [B, N*H, D]
+        preds = preds.reshape(B, N * H, D)
+        targets = targets.reshape(B, N * H, D)
+        return preds, targets
+
     def train_epoch(self, epoch: int) -> float:
         """Run one training epoch.
 
@@ -52,9 +106,9 @@ class Stage2Trainer:
             emotion = batch["emotion"].to(self.device)
             prev_expr = batch["prev_expression"].to(self.device)
 
-            # Forward pass with teacher forcing
-            pred = self.generator(audio, emotion, prev_expr, target_expression=expression)
-            loss = l1_reconstruction_loss(pred, expression, self.dim_weights)
+            # Short-horizon forward (matches autoregressive inference)
+            pred, target = self._short_horizon_forward(expression, audio, emotion, prev_expr)
+            loss = l1_reconstruction_loss(pred, target, self.dim_weights)
 
             # Backward pass
             self.optimizer.zero_grad()

@@ -71,6 +71,7 @@ class Stage2Config:
     beta2: float = 0.999
     weight_decay: float = 1e-5
     grad_clip: float = 1.0
+    gen_horizon: int = 1
     val_every: int = 1
     save_every: int = 5
     seed: int = 42

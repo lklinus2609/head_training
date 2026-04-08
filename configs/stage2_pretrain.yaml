@@ -8,6 +8,7 @@ stage2:
   beta2: 0.999
   weight_decay: 1.0e-5
   grad_clip: 1.0
+  gen_horizon: 1
   val_every: 1
   save_every: 5
   seed: 42
