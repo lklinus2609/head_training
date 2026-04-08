@@ -548,9 +548,20 @@ function renderSequenceList() {
             ? '<span class="badge badge-gt">Pred + GT</span>'
             : '<span class="badge badge-pred">Pred only</span>';
         div.innerHTML = `
-            <div>${seq.name}${gtBadge}</div>
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span>${seq.name}${gtBadge}</span>
+                <button class="btn-delete" title="Delete sequence">&#x2715;</button>
+            </div>
             <div class="sequence-meta">${seq.frames} frames (${(seq.frames / 30).toFixed(1)}s) | ${seq.dims} dims</div>
         `;
+        div.querySelector('.btn-delete').addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (!confirm(`Delete ${seq.name}?`)) return;
+            await fetch(`/api/sequences/${seq.name}`, { method: 'DELETE' });
+            state.sequences = state.sequences.filter(s => s.name !== seq.name);
+            if (state.activeSequence === seq) { state.activeSequence = null; state.activeGT = null; }
+            renderSequenceList();
+        });
         div.addEventListener('click', () => selectSequence(seq.name));
         container.appendChild(div);
     }

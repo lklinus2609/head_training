@@ -74,6 +74,20 @@ async def list_sequences():
     return {"sequences": sequences}
 
 
+@app.delete("/api/sequences/{name}")
+async def delete_sequence(name: str):
+    """Delete a sequence and its associated GT and audio files."""
+    deleted = []
+    for suffix in [".npy", "_gt.npy", ".wav"]:
+        f = SEQUENCES_DIR / f"{name}{suffix}"
+        if f.exists():
+            f.unlink()
+            deleted.append(f.name)
+    if not deleted:
+        return Response(status_code=404, content="Sequence not found")
+    return {"deleted": deleted}
+
+
 @app.get("/api/sequences/{filename}")
 async def get_sequence(filename: str):
     """Load a .npy sequence file and return as binary float32 data."""

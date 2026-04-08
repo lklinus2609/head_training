@@ -94,6 +94,21 @@ body {
     background: #1e2a4a;
 }
 
+.btn-delete {
+    background: none;
+    border: none;
+    color: #666;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+.btn-delete:hover {
+    color: #ff4444;
+    background: rgba(255, 68, 68, 0.15);
+}
+
 .sequence-meta {
     font-size: 11px;
     color: #666;
