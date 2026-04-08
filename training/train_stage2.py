@@ -20,7 +20,7 @@ from configs_schema import load_config
 from data.dataset import FacialMotionDataset
 from models.generator import Generator
 from training.trainer_stage2 import Stage2Trainer
-from utils.checkpoint import find_latest_checkpoint, load_checkpoint
+from utils.checkpoint import create_run_dir, find_latest_checkpoint, load_checkpoint
 from utils.ddp import cleanup_ddp, get_rank, is_main_process, setup_ddp
 from utils.logging_utils import init_wandb
 from utils.seed import seed_everything
@@ -135,16 +135,24 @@ def main():
     # wandb
     wandb_run = init_wandb(config, "stage2_pretrain")
 
-    # Resume from checkpoint
+    # Checkpoint directory: timestamped run folder
     start_epoch = 0
     resume_path = args.resume
     if resume_path == "auto":
         resume_path = find_latest_checkpoint(config.paths.checkpoint_dir, prefix="stage2")
     if resume_path:
+        # Resume into the same run folder
+        from pathlib import Path as _P
+        config.paths.checkpoint_dir = str(_P(resume_path).parent)
         if is_main_process():
             print(f"Resuming from {resume_path}")
         ckpt = load_checkpoint(resume_path, device, generator=(generator, optimizer))
         start_epoch = ckpt["epoch"] + 1
+    else:
+        # Fresh run — create new timestamped folder
+        config.paths.checkpoint_dir = create_run_dir(config.paths.checkpoint_dir, "stage2")
+    if is_main_process():
+        print(f"Checkpoint dir: {config.paths.checkpoint_dir}")
 
     # Compute variance-weighted dimension weights from training stats
     dim_weights = None

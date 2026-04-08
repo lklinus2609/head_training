@@ -89,7 +89,8 @@ def load_checkpoint(
 def find_latest_checkpoint(checkpoint_dir: str, prefix: str = "checkpoint") -> str | None:
     """Find the most recent checkpoint by epoch number.
 
-    Expects filenames like: checkpoint_epoch_042.pt
+    Searches both flat and timestamped subdirectory layouts.
+    Expects filenames like: prefix_epoch_042.pt
     """
     ckpt_dir = Path(checkpoint_dir)
     if not ckpt_dir.exists():
@@ -99,7 +100,7 @@ def find_latest_checkpoint(checkpoint_dir: str, prefix: str = "checkpoint") -> s
     best_epoch = -1
     best_path = None
 
-    for f in ckpt_dir.iterdir():
+    for f in ckpt_dir.rglob(f"{prefix}_epoch_*.pt"):
         m = pattern.match(f.name)
         if m:
             epoch = int(m.group(1))
@@ -108,6 +109,19 @@ def find_latest_checkpoint(checkpoint_dir: str, prefix: str = "checkpoint") -> s
                 best_path = str(f)
 
     return best_path
+
+
+def create_run_dir(checkpoint_dir: str, prefix: str) -> str:
+    """Create a timestamped run directory for checkpoints.
+
+    Returns:
+        Path like: checkpoint_dir/stage2_20260408_1430/
+    """
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    run_dir = Path(checkpoint_dir) / f"{prefix}_{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return str(run_dir)
 
 
 def checkpoint_path(checkpoint_dir: str, epoch: int, prefix: str = "checkpoint") -> str:
