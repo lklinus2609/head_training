@@ -118,7 +118,7 @@ def main():
         audio_conv_kernel_sizes=config.generator.audio_conv_kernel_sizes,
     ).to(device)
 
-    generator = DDP(generator, device_ids=[local_rank])
+    generator = DDP(generator, device_ids=[local_rank], find_unused_parameters=True)
 
     if is_main_process():
         total_params = sum(p.numel() for p in generator.parameters())
