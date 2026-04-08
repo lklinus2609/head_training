@@ -10,11 +10,12 @@
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 #SBATCH --mail-type=END,FAIL
+#SBATCH -A IRI25030
 
 eval "$($WORK/miniconda3/bin/conda shell.bash hook)"
 conda activate d4head
 
-cd $WORK/D4_head/train_head
+cd $WORK/head_training
 
 # NCCL settings for TACC
 export NCCL_DEBUG=INFO
@@ -30,4 +31,4 @@ torchrun \
     --master_port=$MASTER_PORT \
     training/train_stage2.py \
     --config configs/stage2_pretrain.yaml \
-    --resume auto
+    --resume $WORK/checkpoints/d4head/stage2_20260408_1805/stage2_best.pt
