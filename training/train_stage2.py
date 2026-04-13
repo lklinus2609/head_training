@@ -195,8 +195,14 @@ def main():
         if epoch % config.stage2.save_every == 0:
             trainer.save(epoch, val_loss)
 
+        # Early stopping
+        if trainer.should_stop(config.stage2.patience):
+            if is_main_process():
+                print(f"\nEarly stopping: no improvement for {config.stage2.patience} epochs")
+            break
+
     # Save final checkpoint
-    trainer.save(config.stage2.epochs - 1, val_loss)
+    trainer.save(epoch, val_loss)
 
     if wandb_run:
         wandb_run.finish()

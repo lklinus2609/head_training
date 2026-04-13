@@ -74,6 +74,7 @@ class Stage2Config:
     gen_horizon: int = 1
     val_every: int = 1
     save_every: int = 5
+    patience: int = 0
     seed: int = 42
 
 

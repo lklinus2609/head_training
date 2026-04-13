@@ -1,8 +1,8 @@
 _base_: base.yaml
 
 stage2:
-  epochs: 100
-  batch_size: 512
+  epochs: 500
+  batch_size: 128
   lr: 1.0e-4
   beta1: 0.9
   beta2: 0.999
@@ -11,4 +11,5 @@ stage2:
   gen_horizon: 4
   val_every: 1
   save_every: 5
+  patience: 10
   seed: 42

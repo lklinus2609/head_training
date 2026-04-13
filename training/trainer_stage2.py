@@ -33,6 +33,7 @@ class Stage2Trainer:
         self.dim_weights = dim_weights
         self.global_step = 0
         self.best_val_loss = float("inf")
+        self.epochs_without_improvement = 0
 
     def _short_horizon_forward(self, expression, audio, emotion, prev_expr):
         """Batched short-horizon prediction: predict H frames at a time using GT context.
@@ -191,6 +192,7 @@ class Stage2Trainer:
         # Save best model separately
         if val_loss < self.best_val_loss:
             self.best_val_loss = val_loss
+            self.epochs_without_improvement = 0
             best_path = str(
                 __import__("pathlib").Path(self.config.paths.checkpoint_dir) / "stage2_best.pt"
             )
@@ -199,3 +201,9 @@ class Stage2Trainer:
                 generator=(self.generator, self.optimizer),
             )
             print(f"  New best model saved: {best_path}")
+        else:
+            self.epochs_without_improvement += 1
+
+    def should_stop(self, patience: int) -> bool:
+        """Check if training should stop due to no improvement."""
+        return patience > 0 and self.epochs_without_improvement >= patience
