@@ -23,17 +23,25 @@ import numpy as np
 import pickle
 
 
-class _ChumbyStub:
-    """Stub that stands in for any chumpy object during unpickling."""
-    pass
+class _ChumbyStub(np.ndarray):
+    """Stub that stands in for any chumpy object during unpickling.
+
+    Subclasses ndarray so pickle's __setstate__ populates it as an array.
+    """
+
+    def __new__(cls, *args, **kwargs):
+        return np.array(0.0).view(cls)
+
+    def __reduce__(self):
+        return (np.array, (np.array(self),))
 
 
 class _NoChumbyUnpickler(pickle.Unpickler):
-    """Unpickler that replaces chumpy imports with a numpy-friendly stub."""
+    """Unpickler that replaces chumpy imports with plain numpy arrays."""
 
     def find_class(self, module, name):
         if module.startswith("chumpy"):
-            return _ChumbyStub
+            return np.ndarray
         return super().find_class(module, name)
 
 
