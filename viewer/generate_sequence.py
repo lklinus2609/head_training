@@ -175,15 +175,18 @@ def generate_from_model(
 
         elif mode == "teacher":
             # Teacher forcing: use GT as input, for evaluation only
-            for start in range(0, T, seq_len):
-                end = min(start + seq_len, T)
-                chunk_len = end - start
-                audio_chunk = audio_tensor[:, start:start + C + chunk_len + F]
+            gt_T = gt_norm.shape[1]
+            for start in range(0, gt_T, seq_len):
+                end = min(start + seq_len, gt_T)
+                if end <= start:
+                    break
                 gt_chunk = gt_norm[:, start:end]
-                prev_expr_gt = gt_norm[:, max(0, start - P):start] if start >= P else torch.zeros(1, P, config.data.flame_expr_dim, device=device)
-                if prev_expr_gt.shape[1] < P:
-                    pad = torch.zeros(1, P - prev_expr_gt.shape[1], config.data.flame_expr_dim, device=device)
-                    prev_expr_gt = torch.cat([pad, prev_expr_gt], dim=1)
+                audio_chunk = audio_tensor[:, start:start + C + (end - start) + F]
+                if start >= P:
+                    prev_expr_gt = gt_norm[:, start - P:start]
+                else:
+                    pad = torch.zeros(1, P - start, config.data.flame_expr_dim, device=device)
+                    prev_expr_gt = torch.cat([pad, gt_norm[:, :start]], dim=1) if start > 0 else torch.zeros(1, P, config.data.flame_expr_dim, device=device)
                 pred = generator(audio_chunk, emotion_tensor, prev_expr_gt, target_expression=gt_chunk)
                 all_expressions.append(pred.cpu())
 
