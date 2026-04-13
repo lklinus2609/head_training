@@ -55,6 +55,7 @@ def generate_from_model(
     emotion: int,
     output_path: str,
     config_path: str = None,
+    mode: str = "sliding",
 ):
     """Run model inference on audio and save expression sequence."""
     import torch
@@ -129,37 +130,75 @@ def generate_from_model(
     C = config.data.context_past
     F = config.data.context_future
     P = config.data.prev_frames
+    H = getattr(config.stage2, "gen_horizon", 4)
 
     # Pad audio for context
     audio_padded = np.pad(audio_feats, ((C, F), (0, 0)), mode="edge")
     audio_tensor = torch.from_numpy(audio_padded).float().unsqueeze(0).to(device)
 
-    # Autoregressive inference: generate one frame at a time.
-    # The model needs its own previous predictions as decoder input.
     all_expressions = []
     prev_expr = torch.zeros(1, P, config.data.flame_expr_dim, device=device)
     emotion_tensor = torch.tensor([emotion], device=device)
 
-    with torch.no_grad():
-        for start in range(0, T, seq_len):
-            end = min(start + seq_len, T)
-            chunk_len = end - start
-
-            # Audio context for this chunk
-            audio_start = start
-            audio_end = audio_start + chunk_len + C + F
-            audio_chunk = audio_tensor[:, audio_start:audio_end]
-
-            # Autoregressive: generate without teacher forcing
-            pred = generator(audio_chunk, emotion_tensor, prev_expr, target_expression=None, max_len=chunk_len)
-
-            all_expressions.append(pred.cpu())
-
-            # Pass last P frames as context for next chunk
-            if pred.shape[1] >= P:
-                prev_expr = pred[:, -P:]
+    # Load GT for teacher forcing mode
+    gt_norm = None
+    if mode == "teacher":
+        audio_stem = Path(audio_path).stem
+        beat2_dir = Path(config.paths.beat2_raw_dir)
+        npz_candidates = list(beat2_dir.rglob(f"{audio_stem}.npz"))
+        if not npz_candidates:
+            print(f"No GT found for {audio_stem}, falling back to sliding mode")
+            mode = "sliding"
+        else:
+            npz_data = np.load(str(npz_candidates[0]), allow_pickle=True)
+            gt_raw = torch.from_numpy(npz_data["expressions"][:T].astype(np.float32)).to(device)
+            if expr_mean is not None and expr_std is not None:
+                gt_norm = (gt_raw - expr_mean) / expr_std
             else:
-                prev_expr = pred
+                gt_norm = gt_raw
+            gt_norm = gt_norm.unsqueeze(0)  # [1, T, 100]
+
+    print(f"Inference mode: {mode} (H={H}, P={P}, C={C}, F={F})")
+
+    with torch.no_grad():
+        if mode == "sliding":
+            # Sliding window: predict H frames at a time, use own predictions as context
+            for t in range(0, T, H):
+                chunk_len = min(H, T - t)
+                audio_chunk = audio_tensor[:, t:t + C + chunk_len + F]
+                pred = generator(audio_chunk, emotion_tensor, prev_expr, target_expression=None, max_len=chunk_len)
+                all_expressions.append(pred.cpu())
+                if pred.shape[1] >= P:
+                    prev_expr = pred[:, -P:]
+                else:
+                    prev_expr = pred
+
+        elif mode == "teacher":
+            # Teacher forcing: use GT as input, for evaluation only
+            for start in range(0, T, seq_len):
+                end = min(start + seq_len, T)
+                chunk_len = end - start
+                audio_chunk = audio_tensor[:, start:start + C + chunk_len + F]
+                gt_chunk = gt_norm[:, start:end]
+                prev_expr_gt = gt_norm[:, max(0, start - P):start] if start >= P else torch.zeros(1, P, config.data.flame_expr_dim, device=device)
+                if prev_expr_gt.shape[1] < P:
+                    pad = torch.zeros(1, P - prev_expr_gt.shape[1], config.data.flame_expr_dim, device=device)
+                    prev_expr_gt = torch.cat([pad, prev_expr_gt], dim=1)
+                pred = generator(audio_chunk, emotion_tensor, prev_expr_gt, target_expression=gt_chunk)
+                all_expressions.append(pred.cpu())
+
+        elif mode == "autoregressive":
+            # Legacy frame-by-frame autoregressive
+            for start in range(0, T, seq_len):
+                end = min(start + seq_len, T)
+                chunk_len = end - start
+                audio_chunk = audio_tensor[:, start:start + C + chunk_len + F]
+                pred = generator(audio_chunk, emotion_tensor, prev_expr, target_expression=None, max_len=chunk_len)
+                all_expressions.append(pred.cpu())
+                if pred.shape[1] >= P:
+                    prev_expr = pred[:, -P:]
+                else:
+                    prev_expr = pred
 
     expressions = torch.cat(all_expressions, dim=1)[0]  # [T, 100]
 
@@ -219,6 +258,10 @@ def main():
                         help="Output .npy file path")
     parser.add_argument("--duration", type=float, default=5.0,
                         help="Demo sequence duration in seconds")
+    parser.add_argument("--mode", type=str, default="sliding",
+                        choices=["sliding", "teacher", "autoregressive"],
+                        help="Inference mode: sliding (H-frame windows, default), "
+                             "teacher (GT context, eval only), autoregressive (legacy frame-by-frame)")
     args = parser.parse_args()
 
     if args.demo:
@@ -226,7 +269,7 @@ def main():
     else:
         if not args.checkpoint or not args.audio:
             parser.error("--checkpoint and --audio are required when not using --demo")
-        generate_from_model(args.checkpoint, args.audio, args.emotion, args.output, args.config)
+        generate_from_model(args.checkpoint, args.audio, args.emotion, args.output, args.config, args.mode)
 
 
 if __name__ == "__main__":
