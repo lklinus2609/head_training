@@ -94,8 +94,10 @@ class Stage3Config:
     lambda_adv_end: float = 0.1
     lambda_warmup_steps: int = 10000
     disc_steps_per_gen: int = 1
-    gen_horizon: int = 1  # frames predicted per step (1 = match inference exactly)
+    gen_horizon: int = 1
     pretrained_gen_path: str = ""
+    val_every: int = 1
+    save_every: int = 5
     seed: int = 42
 
 

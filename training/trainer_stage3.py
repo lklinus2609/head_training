@@ -143,12 +143,7 @@ class Stage3Trainer:
         self, pred_expression, batch, window_size: int
     ):
         """Build discriminator windows using generated expressions."""
-        from data.flame_utils import compute_velocity, compute_acceleration
-        import numpy as np
-
-        # Compute velocity and acceleration from generated expressions
-        pred_np = pred_expression.detach().cpu().numpy()
-        B, T, D = pred_np.shape
+        B, T, D = pred_expression.shape
         vel = torch.zeros_like(pred_expression)
         acc = torch.zeros_like(pred_expression)
 
@@ -186,24 +181,21 @@ class Stage3Trainer:
             emotion = batch["emotion"].to(self.device)
             prev_expr = batch["prev_expression"].to(self.device)
 
+            # === Generator forward (once, with gradients) ===
+            pred_sh, target_sh = self._short_horizon_forward(expression, audio, emotion, prev_expr)
+            pred_sh_reshaped = pred_sh.reshape(expression.shape[0], -1, expression.shape[-1])
+
             # === Discriminator step ===
             for _ in range(self.config.stage3.disc_steps_per_gen):
-                # Real windows from data
                 real_windows = self._make_disc_windows(expression, velocity, acceleration, audio, K)
-
-                # Generated expressions (short-horizon, matches inference)
-                with torch.no_grad():
-                    pred_sh_d, _ = self._short_horizon_forward(expression, audio, emotion, prev_expr)
-                    pred_sh_d = pred_sh_d.reshape(expression.shape[0], -1, expression.shape[-1])
-                fake_windows = self._compute_disc_windows_from_generated(pred_sh_d, batch, K)
+                fake_windows = self._compute_disc_windows_from_generated(pred_sh_reshaped.detach(), batch, K)
 
                 with torch.cuda.amp.autocast():
                     real_score = self.discriminator(real_windows)
-                    fake_score = self.discriminator(fake_windows.detach())
+                    fake_score = self.discriminator(fake_windows)
                     d_loss = discriminator_loss(real_score, fake_score)
 
-                # GP in float32 (numerically sensitive, already uses math kernel)
-                gp = gradient_penalty(self.discriminator, real_windows.float(), fake_windows.detach().float())
+                gp = gradient_penalty(self.discriminator, real_windows.float(), fake_windows.float())
                 total_d_loss = d_loss + self.config.discriminator.gp_weight * gp
 
                 self.disc_optimizer.zero_grad()
@@ -216,16 +208,11 @@ class Stage3Trainer:
                 self.disc_scaler.update()
 
             # === Generator step ===
-            # Short-horizon forward (matches inference)
-            pred_sh, target_sh = self._short_horizon_forward(expression, audio, emotion, prev_expr)
             recon_loss = l1_reconstruction_loss(pred_sh, target_sh, self.dim_weights)
 
-            # Adversarial loss on short-horizon output (same predictions discriminator will see at inference)
-            fake_windows = self._compute_disc_windows_from_generated(
-                pred_sh.reshape(expression.shape[0], -1, expression.shape[-1]), batch, K
-            )
+            fake_windows_g = self._compute_disc_windows_from_generated(pred_sh_reshaped, batch, K)
             with torch.cuda.amp.autocast():
-                fake_score = self.discriminator(fake_windows)
+                fake_score = self.discriminator(fake_windows_g)
                 adv_loss = generator_adversarial_loss(fake_score)
 
             # Combined generator loss
@@ -292,7 +279,7 @@ class Stage3Trainer:
 
     @torch.no_grad()
     def validate(self, epoch: int) -> float:
-        """Run validation."""
+        """Run validation using short-horizon forward (matches training)."""
         self.generator.eval()
         total_recon = 0.0
         total_mse = 0.0
@@ -304,9 +291,9 @@ class Stage3Trainer:
             emotion = batch["emotion"].to(self.device)
             prev_expr = batch["prev_expression"].to(self.device)
 
-            pred = self.generator(audio, emotion, prev_expr, target_expression=expression)
-            recon = l1_reconstruction_loss(pred, expression, self.dim_weights)
-            mse = F.mse_loss(pred, expression)
+            pred, target = self._short_horizon_forward(expression, audio, emotion, prev_expr)
+            recon = l1_reconstruction_loss(pred, target, self.dim_weights)
+            mse = F.mse_loss(pred, target)
 
             total_recon += recon.item()
             total_mse += mse.item()

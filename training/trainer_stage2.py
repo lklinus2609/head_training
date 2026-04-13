@@ -138,7 +138,7 @@ class Stage2Trainer:
 
     @torch.no_grad()
     def validate(self, epoch: int) -> float:
-        """Run validation and return average loss."""
+        """Run validation using short-horizon forward (matches training)."""
         self.generator.eval()
         total_loss = 0.0
         total_mse = 0.0
@@ -150,9 +150,9 @@ class Stage2Trainer:
             emotion = batch["emotion"].to(self.device)
             prev_expr = batch["prev_expression"].to(self.device)
 
-            pred = self.generator(audio, emotion, prev_expr, target_expression=expression)
-            loss = l1_reconstruction_loss(pred, expression, self.dim_weights)
-            mse = torch.nn.functional.mse_loss(pred, expression)
+            pred, target = self._short_horizon_forward(expression, audio, emotion, prev_expr)
+            loss = l1_reconstruction_loss(pred, target, self.dim_weights)
+            mse = torch.nn.functional.mse_loss(pred, target)
 
             total_loss += loss.item()
             total_mse += mse.item()

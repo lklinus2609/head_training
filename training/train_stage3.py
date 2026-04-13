@@ -233,11 +233,11 @@ def main():
 
         # Validation
         val_loss = float("inf")
-        if epoch % config.stage2.val_every == 0:
+        if epoch % config.stage3.val_every == 0:
             val_loss = trainer.validate(epoch)
 
         # Checkpointing
-        if epoch % config.stage2.save_every == 0:
+        if epoch % config.stage3.save_every == 0:
             trainer.save(epoch, val_loss)
 
     trainer.save(config.stage3.epochs - 1, val_loss)

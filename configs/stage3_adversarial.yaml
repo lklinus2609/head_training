@@ -17,4 +17,6 @@ stage3:
   disc_steps_per_gen: 1
   gen_horizon: 4
   pretrained_gen_path: "$WORK/checkpoints/d4head/stage2_best.pt"
+  val_every: 1
+  save_every: 5
   seed: 42
