@@ -168,10 +168,8 @@ def generate_from_model(
                 audio_chunk = audio_tensor[:, t:t + C + chunk_len + F]
                 pred = generator(audio_chunk, emotion_tensor, prev_expr, target_expression=None, max_len=chunk_len)
                 all_expressions.append(pred.cpu())
-                if pred.shape[1] >= P:
-                    prev_expr = pred[:, -P:]
-                else:
-                    prev_expr = pred
+                # Update prev_expr, keeping exactly P frames
+                prev_expr = torch.cat([prev_expr, pred], dim=1)[:, -P:]
 
         elif mode == "teacher":
             # Teacher forcing: use GT as input, for evaluation only
@@ -198,10 +196,7 @@ def generate_from_model(
                 audio_chunk = audio_tensor[:, start:start + C + chunk_len + F]
                 pred = generator(audio_chunk, emotion_tensor, prev_expr, target_expression=None, max_len=chunk_len)
                 all_expressions.append(pred.cpu())
-                if pred.shape[1] >= P:
-                    prev_expr = pred[:, -P:]
-                else:
-                    prev_expr = pred
+                prev_expr = torch.cat([prev_expr, pred], dim=1)[:, -P:]
 
     expressions = torch.cat(all_expressions, dim=1)[0]  # [T, 100]
 
