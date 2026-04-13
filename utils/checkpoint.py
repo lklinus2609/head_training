@@ -87,20 +87,29 @@ def load_checkpoint(
 
 
 def find_latest_checkpoint(checkpoint_dir: str, prefix: str = "checkpoint") -> str | None:
-    """Find the most recent checkpoint by epoch number.
+    """Find the most recent checkpoint in the most recent run folder.
 
-    Searches both flat and timestamped subdirectory layouts.
-    Expects filenames like: prefix_epoch_042.pt
+    Looks for timestamped subdirectories like prefix_20260413_1545/,
+    picks the newest one, then finds the highest epoch checkpoint inside it.
     """
     ckpt_dir = Path(checkpoint_dir)
     if not ckpt_dir.exists():
         return None
 
+    # Find the most recent run folder by sorting timestamped names
+    run_dirs = sorted(ckpt_dir.glob(f"{prefix}_*"), key=lambda p: p.name, reverse=True)
+    run_dirs = [d for d in run_dirs if d.is_dir()]
+
+    if not run_dirs:
+        return None
+
+    # Search within the most recent run folder only
+    latest_dir = run_dirs[0]
     pattern = re.compile(rf"{prefix}_epoch_(\d+)\.pt")
     best_epoch = -1
     best_path = None
 
-    for f in ckpt_dir.rglob(f"{prefix}_epoch_*.pt"):
+    for f in latest_dir.glob(f"{prefix}_epoch_*.pt"):
         m = pattern.match(f.name)
         if m:
             epoch = int(m.group(1))
