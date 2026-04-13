@@ -191,10 +191,11 @@ class Stage3Trainer:
                 # Real windows from data
                 real_windows = self._make_disc_windows(expression, velocity, acceleration, audio, K)
 
-                # Generated expressions
-                with torch.no_grad(), torch.cuda.amp.autocast():
-                    pred_expr = self.generator(audio, emotion, prev_expr, target_expression=expression)
-                fake_windows = self._compute_disc_windows_from_generated(pred_expr, batch, K)
+                # Generated expressions (short-horizon, matches inference)
+                with torch.no_grad():
+                    pred_sh_d, _ = self._short_horizon_forward(expression, audio, emotion, prev_expr)
+                    pred_sh_d = pred_sh_d.reshape(expression.shape[0], -1, expression.shape[-1])
+                fake_windows = self._compute_disc_windows_from_generated(pred_sh_d, batch, K)
 
                 with torch.cuda.amp.autocast():
                     real_score = self.discriminator(real_windows)
@@ -215,16 +216,17 @@ class Stage3Trainer:
                 self.disc_scaler.update()
 
             # === Generator step ===
-            # Pass 1: Teacher forcing for adversarial loss (needs full sequences for disc windows)
-            with torch.cuda.amp.autocast():
-                pred_expr_tf = self.generator(audio, emotion, prev_expr, target_expression=expression)
-                fake_windows = self._compute_disc_windows_from_generated(pred_expr_tf, batch, K)
-                fake_score = self.discriminator(fake_windows)
-                adv_loss = generator_adversarial_loss(fake_score)
-
-            # Pass 2: Short-horizon for reconstruction loss (matches inference)
+            # Short-horizon forward (matches inference)
             pred_sh, target_sh = self._short_horizon_forward(expression, audio, emotion, prev_expr)
             recon_loss = l1_reconstruction_loss(pred_sh, target_sh, self.dim_weights)
+
+            # Adversarial loss on short-horizon output (same predictions discriminator will see at inference)
+            fake_windows = self._compute_disc_windows_from_generated(
+                pred_sh.reshape(expression.shape[0], -1, expression.shape[-1]), batch, K
+            )
+            with torch.cuda.amp.autocast():
+                fake_score = self.discriminator(fake_windows)
+                adv_loss = generator_adversarial_loss(fake_score)
 
             # Combined generator loss
             lambda_adv = get_lambda_adv(
