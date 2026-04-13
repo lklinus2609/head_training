@@ -23,34 +23,67 @@ import numpy as np
 import pickle
 
 
-class _ChumbyStub(np.ndarray):
-    """Stub that stands in for any chumpy object during unpickling.
-
-    Subclasses ndarray so pickle's __setstate__ populates it as an array.
-    """
-
-    def __new__(cls, *args, **kwargs):
-        return np.array(0.0).view(cls)
-
-    def __reduce__(self):
-        return (np.array, (np.array(self),))
-
-
-class _NoChumbyUnpickler(pickle.Unpickler):
-    """Unpickler that replaces chumpy imports with plain numpy arrays."""
-
-    def find_class(self, module, name):
-        if module.startswith("chumpy"):
-            return np.ndarray
-        return super().find_class(module, name)
-
-
 def load_flame_model(flame_path: str) -> dict:
-    """Load the FLAME model from a pickle file without requiring chumpy."""
-    with open(flame_path, "rb") as f:
-        model = _NoChumbyUnpickler(f, encoding="latin1").load()
+    """Load the FLAME model from a pickle file without requiring chumpy.
 
-    # Convert chumpy/stub arrays to numpy
+    Uses a sys.modules hack to make pickle think chumpy is available,
+    mapping all chumpy classes to a simple wrapper that stores data as numpy.
+    """
+    import types
+
+    # Create fake chumpy modules so pickle can resolve class references
+    class _Ch(np.ndarray):
+        """Minimal chumpy.Ch stand-in that behaves as ndarray."""
+        def __new__(cls, *args, **kwargs):
+            return np.array(0.0).view(cls)
+        def __setstate__(self, state):
+            # chumpy pickles store data in state; just ignore non-array state
+            if isinstance(state, tuple):
+                # ndarray.__setstate__ expects (version, shape, dtype, fortran, data)
+                try:
+                    super().__setstate__(state)
+                except Exception:
+                    pass
+            elif isinstance(state, dict):
+                pass
+
+    fake_ch = types.ModuleType("chumpy")
+    fake_ch.Ch = _Ch
+    fake_ch.ch = types.ModuleType("chumpy.ch")
+    fake_ch.ch.Ch = _Ch
+    fake_ch.ch.MatVecMult = _Ch
+    fake_ch.utils = types.ModuleType("chumpy.utils")
+    fake_ch.logic = types.ModuleType("chumpy.logic")
+    fake_ch.reordering = types.ModuleType("chumpy.reordering")
+
+    # Assign _Ch as fallback for any attribute access
+    for mod in [fake_ch, fake_ch.ch, fake_ch.utils, fake_ch.logic, fake_ch.reordering]:
+        mod.__dict__.setdefault("__getattr__", lambda name, _C=_Ch: _C)
+
+    import sys
+    saved = {}
+    for name in list(sys.modules.keys()):
+        if name.startswith("chumpy"):
+            saved[name] = sys.modules[name]
+
+    sys.modules["chumpy"] = fake_ch
+    sys.modules["chumpy.ch"] = fake_ch.ch
+    sys.modules["chumpy.utils"] = fake_ch.utils
+    sys.modules["chumpy.logic"] = fake_ch.logic
+    sys.modules["chumpy.reordering"] = fake_ch.reordering
+
+    try:
+        with open(flame_path, "rb") as f:
+            model = pickle.load(f, encoding="latin1")
+    finally:
+        # Restore original modules
+        for name in ["chumpy", "chumpy.ch", "chumpy.utils", "chumpy.logic", "chumpy.reordering"]:
+            if name in saved:
+                sys.modules[name] = saved[name]
+            else:
+                sys.modules.pop(name, None)
+
+    # Convert everything to numpy
     result = {}
     for key, val in model.items():
         try:
