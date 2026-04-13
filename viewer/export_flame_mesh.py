@@ -23,15 +23,26 @@ import numpy as np
 import pickle
 
 
+class _ChumbyStub:
+    """Stub that stands in for any chumpy object during unpickling."""
+    pass
+
+
+class _NoChumbyUnpickler(pickle.Unpickler):
+    """Unpickler that replaces chumpy imports with a numpy-friendly stub."""
+
+    def find_class(self, module, name):
+        if module.startswith("chumpy"):
+            return _ChumbyStub
+        return super().find_class(module, name)
+
+
 def load_flame_model(flame_path: str) -> dict:
-    """Load the FLAME model from a pickle file.
-
-    Requires chumpy to be installed (the FLAME pickle contains chumpy.Ch objects).
-    """
+    """Load the FLAME model from a pickle file without requiring chumpy."""
     with open(flame_path, "rb") as f:
-        model = pickle.load(f, encoding="latin1")
+        model = _NoChumbyUnpickler(f, encoding="latin1").load()
 
-    # Convert chumpy arrays to numpy
+    # Convert chumpy/stub arrays to numpy
     result = {}
     for key, val in model.items():
         try:
