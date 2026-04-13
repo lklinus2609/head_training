@@ -120,6 +120,15 @@ def main():
 
     # Load pretrained generator weights from Stage 2
     pretrained_path = args.pretrained_gen or config.stage3.pretrained_gen_path
+    if not pretrained_path:
+        # Auto-find most recent stage2 run's best checkpoint
+        from pathlib import Path as _P
+        ckpt_base = _P(config.paths.checkpoint_dir).parent if "stage3" in config.paths.checkpoint_dir else _P(config.paths.checkpoint_dir)
+        stage2_runs = sorted(ckpt_base.glob("stage2_*/stage2_best.pt"))
+        if stage2_runs:
+            pretrained_path = str(stage2_runs[-1])
+            if is_main_process():
+                print(f"Auto-detected Stage 2 checkpoint: {pretrained_path}")
     if pretrained_path:
         if is_main_process():
             print(f"Loading pretrained generator from {pretrained_path}")
