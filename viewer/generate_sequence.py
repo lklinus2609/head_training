@@ -252,7 +252,7 @@ def main():
     parser.add_argument("--config", type=str, default=None, help="Config YAML path (optional)")
     parser.add_argument("--audio", type=str, help="Input audio file path")
     parser.add_argument("--emotion", type=int, default=0, help="Emotion label (0-7)")
-    parser.add_argument("--output", type=str, default="static/sequences/demo.npy",
+    parser.add_argument("--output", type=str, default=str(Path(__file__).parent / "static" / "sequences" / "demo.npy"),
                         help="Output .npy file path")
     parser.add_argument("--duration", type=float, default=5.0,
                         help="Demo sequence duration in seconds")
