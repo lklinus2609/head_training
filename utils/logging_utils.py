@@ -24,7 +24,7 @@ def init_wandb(config, stage_name: str, run_name: str | None = None):
         run_name = f"{stage_name}_{datetime.now():%Y%m%d_%H%M}"
 
     run = wandb.init(
-        project=config.wandb_project,
+        project=f"{config.wandb_project}-{stage_name}",
         entity=config.wandb_entity or None,
         config=asdict(config),
         name=run_name,
