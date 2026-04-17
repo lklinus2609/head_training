@@ -175,6 +175,20 @@ def main():
         dim_weights=dim_weights,
     )
 
+    if resume_path:
+        trainer.global_step = ckpt.get("global_step") or 0
+
+    scheduler = None
+    if config.stage2.use_cosine_lr:
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+        scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=config.stage2.epochs,
+            eta_min=config.stage2.lr * config.stage2.cosine_lr_min_ratio,
+        )
+        for _ in range(start_epoch):
+            scheduler.step()
+
     for epoch in range(start_epoch, config.stage2.epochs):
         train_sampler.set_epoch(epoch)
 
@@ -194,6 +208,9 @@ def main():
         # Checkpointing
         if epoch % config.stage2.save_every == 0:
             trainer.save(epoch, val_loss)
+
+        if scheduler is not None:
+            scheduler.step()
 
         # Early stopping
         if trainer.should_stop(config.stage2.patience):

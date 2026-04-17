@@ -14,3 +14,8 @@ stage2:
   patience: 10
   seed: 42
   lambda_var: 0.05
+  lambda_var_warmup_epochs: 40
+  lambda_var_decay_epochs: 40
+  ref_clip_audio_path: "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/2_scott_0_8_8.wav"
+  use_cosine_lr: true
+  cosine_lr_min_ratio: 0.1

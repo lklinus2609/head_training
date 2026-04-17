@@ -13,6 +13,7 @@ def save_checkpoint(
     epoch: int,
     val_loss: float,
     config: dict,
+    global_step: int | None = None,
     **model_optimizer_pairs,
 ):
     """Save a training checkpoint.
@@ -22,6 +23,8 @@ def save_checkpoint(
         epoch: Current epoch number.
         val_loss: Current validation loss.
         config: Training config as dict.
+        global_step: Trainer global step for wandb x-axis continuity across
+            resumes. None is tolerated for legacy callers.
         **model_optimizer_pairs: Keyword args where keys are names and values
             are (model, optimizer) tuples. E.g. generator=(gen_model, gen_opt).
     """
@@ -29,6 +32,7 @@ def save_checkpoint(
         "epoch": epoch,
         "val_loss": val_loss,
         "config": config,
+        "global_step": global_step,
         "rng_states": {
             "python": random.getstate(),
             "numpy": np.random.get_state(),

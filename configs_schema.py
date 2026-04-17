@@ -77,6 +77,11 @@ class Stage2Config:
     patience: int = 0
     seed: int = 42
     lambda_var: float = 0.0
+    lambda_var_warmup_epochs: int = 0
+    lambda_var_decay_epochs: int = 0
+    ref_clip_audio_path: str = ""
+    use_cosine_lr: bool = False
+    cosine_lr_min_ratio: float = 0.1
 
 
 @dataclass
