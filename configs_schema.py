@@ -76,6 +76,7 @@ class Stage2Config:
     save_every: int = 5
     patience: int = 0
     seed: int = 42
+    lambda_var: float = 0.0
 
 
 @dataclass

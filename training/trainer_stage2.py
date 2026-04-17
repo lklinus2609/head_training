@@ -3,7 +3,7 @@
 import torch
 from tqdm import tqdm
 
-from training.losses import l1_reconstruction_loss
+from training.losses import l1_reconstruction_loss, variance_matching_loss
 from utils.checkpoint import checkpoint_path, save_checkpoint
 from utils.ddp import is_main_process, reduce_mean
 from utils.logging_utils import log_metrics
@@ -109,7 +109,14 @@ class Stage2Trainer:
 
             # Short-horizon forward (matches autoregressive inference)
             pred, target = self._short_horizon_forward(expression, audio, emotion, prev_expr)
-            loss = l1_reconstruction_loss(pred, target, self.dim_weights)
+            l1 = l1_reconstruction_loss(pred, target, self.dim_weights)
+            lambda_var = self.config.stage2.lambda_var
+            if lambda_var > 0.0:
+                var_loss = variance_matching_loss(pred, target)
+                loss = l1 + lambda_var * var_loss
+            else:
+                var_loss = torch.zeros((), device=pred.device)
+                loss = l1
 
             # Backward pass
             self.optimizer.zero_grad()
@@ -125,10 +132,19 @@ class Stage2Trainer:
             self.global_step += 1
 
             if is_main_process():
-                pbar.set_postfix(loss=f"{loss.item():.4f}")
+                pbar.set_postfix(
+                    loss=f"{loss.item():.4f}",
+                    l1=f"{l1.item():.4f}",
+                    var=f"{var_loss.item():.4f}",
+                )
                 if self.global_step % 50 == 0:
                     log_metrics(
-                        {"stage2/train_loss": loss.item(), "stage2/lr": self.optimizer.param_groups[0]["lr"]},
+                        {
+                            "stage2/train_loss": loss.item(),
+                            "stage2/train_l1": l1.item(),
+                            "stage2/train_var": var_loss.item(),
+                            "stage2/lr": self.optimizer.param_groups[0]["lr"],
+                        },
                         step=self.global_step,
                         run=self.wandb_run,
                     )
@@ -138,9 +154,14 @@ class Stage2Trainer:
 
     @torch.no_grad()
     def validate(self, epoch: int) -> float:
-        """Run validation using short-horizon forward (matches training)."""
+        """Run validation using short-horizon forward (matches training).
+
+        Returns average L1 (pure, unweighted by lambda_var) so checkpoint
+        selection stays comparable across runs with different lambda_var.
+        """
         self.generator.eval()
         total_loss = 0.0
+        total_var = 0.0
         total_mse = 0.0
         num_batches = 0
 
@@ -152,26 +173,30 @@ class Stage2Trainer:
 
             pred, target = self._short_horizon_forward(expression, audio, emotion, prev_expr)
             loss = l1_reconstruction_loss(pred, target, self.dim_weights)
+            var_loss = variance_matching_loss(pred, target)
             mse = torch.nn.functional.mse_loss(pred, target)
 
             total_loss += loss.item()
+            total_var += var_loss.item()
             total_mse += mse.item()
             num_batches += 1
 
         avg_loss = total_loss / max(num_batches, 1)
+        avg_var = total_var / max(num_batches, 1)
         avg_mse = total_mse / max(num_batches, 1)
 
         if is_main_process():
             log_metrics(
                 {
                     "stage2/val_loss": avg_loss,
+                    "stage2/val_var": avg_var,
                     "stage2/val_mse": avg_mse,
                     "stage2/epoch": epoch,
                 },
                 step=self.global_step,
                 run=self.wandb_run,
             )
-            print(f"  Val L1: {avg_loss:.4f}, Val MSE: {avg_mse:.4f}")
+            print(f"  Val L1: {avg_loss:.4f}, Val Var: {avg_var:.4f}, Val MSE: {avg_mse:.4f}")
 
         return avg_loss
 

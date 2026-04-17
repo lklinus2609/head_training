@@ -25,6 +25,26 @@ def l1_reconstruction_loss(
     return weighted.mean()
 
 
+def variance_matching_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+) -> torch.Tensor:
+    """Per-dim within-sample std matching.
+
+    Penalizes the mismatch between predicted and target per-dim motion range,
+    averaged across the batch. Complements L1: L1 minimizes at the conditional
+    mean (collapsing variance on multimodal targets); this term keeps spread
+    calibrated per dim.
+
+    Args:
+        pred: Predicted expressions [B, T, D].
+        target: Ground truth expressions [B, T, D].
+    """
+    pred_std = pred.std(dim=1, unbiased=False).mean(dim=0)   # [D]
+    gt_std = target.std(dim=1, unbiased=False).mean(dim=0)   # [D]
+    return ((pred_std - gt_std) ** 2).mean()
+
+
 def discriminator_loss(
     real_score: torch.Tensor,
     fake_score: torch.Tensor,

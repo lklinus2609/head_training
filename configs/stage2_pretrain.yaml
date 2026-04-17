@@ -13,3 +13,4 @@ stage2:
   save_every: 5
   patience: 10
   seed: 42
+  lambda_var: 0.05
