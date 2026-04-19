@@ -2,12 +2,14 @@
 
 from pathlib import Path
 
-import numpy as np
-import soundfile as sf
 import torch
 from tqdm import tqdm
 
-from data.audio_features import extract_mel
+from evaluation.ref_clip import (
+    ar_slide_inference,
+    compute_ref_metrics,
+    prepare_ref_clip,
+)
 from training.losses import l1_reconstruction_loss, variance_matching_loss
 from utils.checkpoint import checkpoint_path, save_checkpoint
 from utils.ddp import is_main_process, reduce_mean
@@ -44,19 +46,30 @@ class Stage2Trainer:
         # Loaded once on rank 0 here; _run_ref_inference reuses the tensors each val.
         self.ref_clip = None
         if is_main_process() and config.stage2.ref_clip_audio_path:
-            self.ref_clip = self._prepare_ref_clip(config.stage2.ref_clip_audio_path)
+            self.ref_clip = prepare_ref_clip(
+                config, self.train_loader.dataset.stats, device
+            )
 
-    def _short_horizon_forward(self, expression, audio, emotion, prev_expr):
+    def _short_horizon_forward(self, expression, audio, emotion, prev_expr, p_drift: float = 0.0):
         """Batched short-horizon prediction: predict H frames at a time using GT context.
 
         Eliminates the teacher-forcing mismatch by using the same prediction mode
         as autoregressive inference (target_expression=None).
+
+        When p_drift > 0, for each window beyond the first, each sample in the
+        batch independently decides (with probability p_drift) to replace its
+        GT prev-frames with the generator's own detached output from the prior
+        window. This practises self-drift recovery at training time, closing
+        the train/inference gap that drives motion-range damping.
 
         Args:
             expression: Ground truth expression [B, T, D].
             audio: Audio features with context [B, C+T+F, audio_dim].
             emotion: Emotion labels [B].
             prev_expr: Previous expression frames [B, P, D].
+            p_drift: Probability of using the generator's own prev-frames
+                instead of GT for windows beyond the first. Default 0 → fast
+                batched path.
 
         Returns:
             (predictions, targets): each [B, N*H, D] where N = T // H.
@@ -67,146 +80,87 @@ class Stage2Trainer:
         P = self.config.data.prev_frames
         H = self.config.stage2.gen_horizon
 
-        # Concatenate prev context and expression for easy window extraction
         full_expr = torch.cat([prev_expr, expression], dim=1)  # [B, P+T, D]
-
-        # Collect windows for all positions with stride H
         positions = list(range(0, T - H + 1, H))
         N = len(positions)
         audio_len = C + H + F
 
-        prev_list = []
-        audio_list = []
-        target_list = []
-        for t in positions:
-            prev_list.append(full_expr[:, t:t + P])
-            audio_list.append(audio[:, t:t + audio_len])
-            target_list.append(expression[:, t:t + H])
+        if p_drift <= 0.0:
+            # Fast batched path: stack all windows and run one forward.
+            prev_list, audio_list, target_list = [], [], []
+            for t in positions:
+                prev_list.append(full_expr[:, t:t + P])
+                audio_list.append(audio[:, t:t + audio_len])
+                target_list.append(expression[:, t:t + H])
 
-        # Stack and reshape into a single large batch [B*N, ...]
-        prev_windows = torch.stack(prev_list, dim=1).reshape(B * N, P, D)
-        audio_windows = torch.stack(audio_list, dim=1).reshape(B * N, audio_len, -1)
-        emotion_expanded = emotion.unsqueeze(1).expand(-1, N).reshape(B * N)
-        targets = torch.stack(target_list, dim=1).reshape(B * N, H, D)
+            prev_windows = torch.stack(prev_list, dim=1).reshape(B * N, P, D)
+            audio_windows = torch.stack(audio_list, dim=1).reshape(B * N, audio_len, -1)
+            emotion_expanded = emotion.unsqueeze(1).expand(-1, N).reshape(B * N)
+            targets = torch.stack(target_list, dim=1).reshape(B * N, H, D)
 
-        # Forward pass: predict H frames per window (no teacher forcing)
-        preds = self.generator(
-            audio_windows, emotion_expanded, prev_windows,
-            target_expression=None, max_len=H,
-        )  # [B*N, H, D]
+            preds = self.generator(
+                audio_windows, emotion_expanded, prev_windows,
+                target_expression=None, max_len=H,
+            )  # [B*N, H, D]
 
-        # Reshape back to [B, N*H, D]
-        preds = preds.reshape(B, N * H, D)
-        targets = targets.reshape(B, N * H, D)
+            preds = preds.reshape(B, N * H, D)
+            targets = targets.reshape(B, N * H, D)
+            return preds, targets
+
+        # Self-drift path: sequential across windows. Detach the drifted prev
+        # so we don't BPTT across the whole clip — gradients only flow from
+        # each window's own L1 back through its own forward.
+        running_prev = full_expr[:, 0:P]
+        preds_all = []
+        targets_all = []
+        for j, t in enumerate(positions):
+            gt_prev = full_expr[:, t:t + P]
+            if j == 0:
+                prev_win = gt_prev
+            else:
+                drift_mask = torch.rand(B, device=expression.device) < p_drift
+                prev_win = torch.where(
+                    drift_mask[:, None, None], running_prev.detach(), gt_prev
+                )
+            audio_win = audio[:, t:t + audio_len]
+            pred = self.generator(
+                audio_win, emotion, prev_win,
+                target_expression=None, max_len=H,
+            )  # [B, H, D]
+            preds_all.append(pred)
+            targets_all.append(expression[:, t:t + H])
+            running_prev = pred[:, -P:]
+
+        preds = torch.cat(preds_all, dim=1)
+        targets = torch.cat(targets_all, dim=1)
         return preds, targets
 
-    def _prepare_ref_clip(self, audio_path: str) -> dict | None:
-        """Pre-load the reference clip for per-val-epoch raw-L1 evaluation.
-
-        Mirrors the setup portion of viewer/generate_sequence.py:generate_from_model.
-        Returns None if the audio file or matching BEAT2 npz is missing (logs a warning).
-        Only called on rank 0.
-        """
-        audio_path = Path(audio_path)
-        if not audio_path.exists():
-            print(f"  [ref_clip] audio not found: {audio_path} — skipping ref eval")
-            return None
-
-        if self.config.data.audio_feature != "mel":
-            print(f"  [ref_clip] only mel audio_feature supported; got "
-                  f"{self.config.data.audio_feature} — skipping ref eval")
-            return None
-
-        waveform, sr = sf.read(str(audio_path))
-        if waveform.ndim > 1:
-            waveform = waveform.mean(axis=1)
-        waveform = waveform.astype(np.float32)
-
-        audio_feats = extract_mel(
-            waveform, sr, self.config.data.fps,
-            n_mels=self.config.data.mel_n_mels,
-            win_ms=self.config.data.mel_win_ms,
-            hop_ms=self.config.data.mel_hop_ms,
-        )
-
-        C = self.config.data.context_past
-        F = self.config.data.context_future
-        audio_padded = np.pad(audio_feats, ((C, F), (0, 0)), mode="edge")
-        audio_tensor = torch.from_numpy(audio_padded).float().unsqueeze(0).to(self.device)
-
-        # Emotion from filename: {speaker}_{name}_{emotion}_{seq}_{take}
-        parts = audio_path.stem.split("_")
-        try:
-            emotion = int(parts[2])
-        except (IndexError, ValueError):
-            emotion = 0
-        emotion_tensor = torch.tensor([emotion], device=self.device)
-
-        # Find matching BEAT2 npz for ground truth (raw FLAME space, 30 fps)
-        beat2_dir = Path(self.config.paths.beat2_raw_dir)
-        npz_candidates = list(beat2_dir.rglob(f"{audio_path.stem}.npz"))
-        if not npz_candidates:
-            print(f"  [ref_clip] no matching npz for {audio_path.stem} under "
-                  f"{beat2_dir} — skipping ref eval")
-            return None
-        npz_data = np.load(str(npz_candidates[0]), allow_pickle=True)
-        if "expressions" not in npz_data:
-            print(f"  [ref_clip] npz has no 'expressions' field — skipping ref eval")
-            return None
-        gt_raw = npz_data["expressions"][:, :self.config.data.flame_expr_dim].astype(np.float32)
-
-        # Pull normalization stats from the train dataset (same ones dim_weights uses)
-        ds_stats = self.train_loader.dataset.stats
-        if "expr_mean" not in ds_stats or "expr_std" not in ds_stats:
-            print(f"  [ref_clip] train dataset missing expr_mean/expr_std — skipping ref eval")
-            return None
-        expr_mean = torch.from_numpy(ds_stats["expr_mean"]).float().to(self.device)
-        expr_std = torch.from_numpy(ds_stats["expr_std"]).float().to(self.device)
-        expr_std = torch.where(expr_std < 1e-8, torch.ones_like(expr_std), expr_std)
-
-        T = audio_feats.shape[0]
-        print(f"  [ref_clip] loaded {audio_path.name}: T={T} frames, emotion={emotion}, "
-              f"gt_frames={gt_raw.shape[0]}")
-
-        return {
-            "audio": audio_tensor,
-            "emotion": emotion_tensor,
-            "gt_raw": gt_raw,
-            "expr_mean": expr_mean,
-            "expr_std": expr_std,
-            "T": T,
-        }
+    def _effective_p_drift(self, epoch: int) -> float:
+        start = self.config.stage2.p_drift_start
+        end = self.config.stage2.p_drift_end
+        w = self.config.stage2.p_drift_warmup_epochs
+        if w <= 0 or epoch >= w:
+            return end
+        return start + (end - start) * (epoch / w)
 
     @torch.no_grad()
-    def _run_ref_inference(self) -> float:
-        """Sliding-mode inference on the reference clip; returns raw-space L1."""
-        C = self.config.data.context_past
-        F = self.config.data.context_future
-        P = self.config.data.prev_frames
-        H = self.config.stage2.gen_horizon
-        D = self.config.data.flame_expr_dim
-        T = self.ref_clip["T"]
-        audio = self.ref_clip["audio"]
-        emotion = self.ref_clip["emotion"]
+    def _run_ref_inference(self) -> dict:
+        """Sliding-mode AR inference on the reference clip plus metric computation.
 
-        gen = self.generator.module if hasattr(self.generator, "module") else self.generator
-
-        prev_expr = torch.zeros(1, P, D, device=self.device)
-        chunks = []
-        for t in range(0, T, H):
-            chunk_len = min(H, T - t)
-            audio_chunk = audio[:, t:t + C + chunk_len + F]
-            pred = gen(audio_chunk, emotion, prev_expr,
-                       target_expression=None, max_len=chunk_len)
-            chunks.append(pred)
-            prev_expr = torch.cat([prev_expr, pred], dim=1)[:, -P:]
-
-        pred_norm = torch.cat(chunks, dim=1)[0]  # [T, D]
-        pred_raw = (pred_norm * self.ref_clip["expr_std"] + self.ref_clip["expr_mean"]).cpu().numpy()
-
-        gt_raw = self.ref_clip["gt_raw"]
-        n = min(pred_raw.shape[0], gt_raw.shape[0])
-        return float(np.abs(pred_raw[:n] - gt_raw[:n]).mean())
+        Returns the metrics dict from `compute_ref_metrics`. The best-checkpoint
+        selection metric (`ref_raw_l1`) is unchanged from the prior inline impl.
+        """
+        pred_norm = ar_slide_inference(
+            self.generator,
+            self.ref_clip,
+            horizon=self.config.stage2.gen_horizon,
+            context_past=self.config.data.context_past,
+            context_future=self.config.data.context_future,
+            prev_frames=self.config.data.prev_frames,
+            expr_dim=self.config.data.flame_expr_dim,
+            device=self.device,
+        )
+        return compute_ref_metrics(pred_norm, self.ref_clip)
 
     def _effective_lambda_var(self, epoch: int) -> float:
         lv = self.config.stage2.lambda_var
@@ -216,6 +170,30 @@ class Stage2Trainer:
             return lv
         if d > 0 and epoch < w + d:
             return lv * (1.0 - (epoch - w) / d)
+        return 0.0
+
+    def _effective_lambda_var_full(self, epoch: int) -> float:
+        """Late-stage full-rollout variance matching weight.
+
+        Zero until `lambda_var_full_start`, then `lambda_var_full` until the
+        last `lambda_var_full_decay_epochs` of training, which linearly fade
+        the weight back to zero. Motivation (commit e549ef7): avoid a strong
+        late-epoch regularization gradient that can kick the optimizer out
+        of a good basin.
+        """
+        lvf = self.config.stage2.lambda_var_full
+        if lvf <= 0.0:
+            return 0.0
+        start = self.config.stage2.lambda_var_full_start
+        if epoch < start:
+            return 0.0
+        decay = self.config.stage2.lambda_var_full_decay_epochs
+        total = self.config.stage2.epochs
+        decay_start = total - decay if decay > 0 else total
+        if epoch < decay_start:
+            return lvf
+        if decay > 0 and epoch < total:
+            return lvf * (1.0 - (epoch - decay_start) / decay)
         return 0.0
 
     def train_epoch(self, epoch: int) -> float:
@@ -237,7 +215,10 @@ class Stage2Trainer:
             prev_expr = batch["prev_expression"].to(self.device)
 
             # Short-horizon forward (matches autoregressive inference)
-            pred, target = self._short_horizon_forward(expression, audio, emotion, prev_expr)
+            p_drift = self._effective_p_drift(epoch)
+            pred, target = self._short_horizon_forward(
+                expression, audio, emotion, prev_expr, p_drift=p_drift,
+            )
             l1 = l1_reconstruction_loss(pred, target, self.dim_weights)
             lambda_var = self._effective_lambda_var(epoch)
             if lambda_var > 0.0:
@@ -246,6 +227,20 @@ class Stage2Trainer:
             else:
                 var_loss = torch.zeros((), device=pred.device)
                 loss = l1
+
+            # Track A3: full-rollout variance matching. Re-run as a sequential
+            # AR rollout (p_drift=1.0) and add a variance-matching term on the
+            # rolled-out sequence — punishes motion collapse under self-drift,
+            # which the short-horizon patchwork cannot. Gated by schedule.
+            lambda_var_full = self._effective_lambda_var_full(epoch)
+            if lambda_var_full > 0.0:
+                full_pred, full_target = self._short_horizon_forward(
+                    expression, audio, emotion, prev_expr, p_drift=1.0,
+                )
+                var_full_loss = variance_matching_loss(full_pred, full_target)
+                loss = loss + lambda_var_full * var_full_loss
+            else:
+                var_full_loss = torch.zeros((), device=pred.device)
 
             # Backward pass
             self.optimizer.zero_grad()
@@ -272,7 +267,10 @@ class Stage2Trainer:
                             "stage2/train_loss": loss.item(),
                             "stage2/train_l1": l1.item(),
                             "stage2/train_var": var_loss.item(),
+                            "stage2/train_var_full": var_full_loss.item(),
                             "stage2/lambda_var_eff": lambda_var,
+                            "stage2/lambda_var_full_eff": lambda_var_full,
+                            "stage2/p_drift_eff": p_drift,
                             "stage2/lr": self.optimizer.param_groups[0]["lr"],
                         },
                         step=self.global_step,
@@ -331,16 +329,29 @@ class Stage2Trainer:
 
         # Raw-L1 on reference clip — selection metric when configured.
         if self.ref_clip is not None:
-            ref_l1 = self._run_ref_inference()
+            m = self._run_ref_inference()
             if is_main_process():
                 log_metrics(
-                    {"stage2/val_ref_raw_l1": ref_l1},
+                    {
+                        "stage2/val_ref_raw_l1": m["ref_raw_l1"],
+                        "stage2/val_ref_raw_l1_lag": m["ref_raw_l1_lag"],
+                        "stage2/val_ref_std_ratio_full": m["ref_std_ratio_full"],
+                        "stage2/val_ref_std_ratio_mouth": m["ref_std_ratio_mouth"],
+                        "stage2/val_ref_std_ratio_problem": m["ref_std_ratio_problem"],
+                    },
                     step=self.global_step,
                     run=self.wandb_run,
                 )
-                print(f"  Val Ref Raw L1 "
-                      f"({Path(self.config.stage2.ref_clip_audio_path).stem}): {ref_l1:.4f}")
-            return ref_l1
+                print(
+                    f"  Val Ref Raw L1 "
+                    f"({Path(self.config.stage2.ref_clip_audio_path).stem}): "
+                    f"{m['ref_raw_l1']:.4f} "
+                    f"(lag-tol {m['ref_raw_l1_lag']:.4f}) | "
+                    f"std ratio full={m['ref_std_ratio_full']:.3f} "
+                    f"mouth={m['ref_std_ratio_mouth']:.3f} "
+                    f"problem={m['ref_std_ratio_problem']:.3f}"
+                )
+            return m["ref_raw_l1"]
 
         return avg_loss
 

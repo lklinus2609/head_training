@@ -82,6 +82,19 @@ class Stage2Config:
     ref_clip_audio_path: str = ""
     use_cosine_lr: bool = False
     cosine_lr_min_ratio: float = 0.1
+    # Self-drift schedule (Track A2): probability of feeding the generator's
+    # own prior output as prev-frames during short-horizon training. Linearly
+    # ramped from start → end over `p_drift_warmup_epochs`. Default 0 = off.
+    p_drift_start: float = 0.0
+    p_drift_end: float = 0.0
+    p_drift_warmup_epochs: int = 0
+    # Longer-horizon variance matching (Track A3): run one full 60-frame AR
+    # rollout per batch from `lambda_var_full_start` onward and compute
+    # variance-matching loss on it with weight `lambda_var_full`. Faded to 0
+    # over `lambda_var_full_decay_epochs` ending at `epochs`. Default 0 = off.
+    lambda_var_full: float = 0.0
+    lambda_var_full_start: int = 0
+    lambda_var_full_decay_epochs: int = 0
 
 
 @dataclass
@@ -105,6 +118,40 @@ class Stage3Config:
     val_every: int = 1
     save_every: int = 5
     seed: int = 42
+    # Self-drift schedule (Track A2). Default 0 = off (current behavior).
+    p_drift_start: float = 0.0
+    p_drift_end: float = 0.0
+    p_drift_warmup_epochs: int = 0
+
+
+@dataclass
+class FMConfig:
+    """Flow-matching training config (parallel track to Stage 2 / Stage 3).
+
+    FM trains on `window_size`-frame windows from each training sample. At
+    inference it slides windows and autoregresses between them, feeding the
+    last `prev_frames` generated frames as conditioning for the next window.
+    """
+    epochs: int = 100
+    batch_size: int = 64
+    lr: float = 1e-4
+    beta1: float = 0.9
+    beta2: float = 0.999
+    weight_decay: float = 1e-5
+    grad_clip: float = 1.0
+    window_size: int = 30
+    t_sampling: str = "uniform"   # "uniform" or "logit_normal"
+    nfe_inference: int = 4
+    time_embed_dim: int = 64
+    val_every: int = 1
+    save_every: int = 5
+    patience: int = 0
+    seed: int = 42
+    use_cosine_lr: bool = False
+    cosine_lr_min_ratio: float = 0.1
+    # Best-of-K stochastic ref-clip evaluation. 0 or 1 → single-sample metric;
+    # >1 → report min over K samples (fair comparison vs deterministic baseline).
+    eval_n_samples: int = 4
 
 
 @dataclass
@@ -115,6 +162,7 @@ class TrainConfig:
     discriminator: DiscriminatorConfig = field(default_factory=DiscriminatorConfig)
     stage2: Stage2Config = field(default_factory=Stage2Config)
     stage3: Stage3Config = field(default_factory=Stage3Config)
+    fm: FMConfig = field(default_factory=FMConfig)
     wandb_project: str = "d4-head-facial-motion"
     wandb_entity: str = ""
 
@@ -148,6 +196,12 @@ def _validate(config: TrainConfig):
         )
     if config.data.seq_len < config.data.disc_window:
         raise ValueError("data.seq_len must be >= data.disc_window")
+    if config.data.seq_len < config.fm.window_size:
+        raise ValueError("data.seq_len must be >= fm.window_size")
+    if config.fm.t_sampling not in ("uniform", "logit_normal"):
+        raise ValueError(
+            f"fm.t_sampling must be 'uniform' or 'logit_normal', got '{config.fm.t_sampling}'"
+        )
     if config.generator.n_layers < 1:
         raise ValueError("generator.n_layers must be >= 1")
     if config.discriminator.n_layers < 1:

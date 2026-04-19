@@ -1,0 +1,34 @@
+_base_: base.yaml
+
+# Track A1: enlarge discriminator window from 5 → 30 frames (167 ms → 1 s).
+# A 5-frame window cannot resolve prosodic arcs; the original 0.82 pred_std/gt_std
+# ratio survived Stage 3 because the discriminator could not tell "damped real"
+# from "real" at 167 ms. Bumping the transformer depth to 4 absorbs the larger
+# temporal context. `TemporalDiscriminator` handles arbitrary K via positional
+# encoding + mean-pool readout, so no code change is needed.
+data:
+  disc_window: 30
+
+discriminator:
+  n_layers: 4
+
+stage3:
+  epochs: 100
+  batch_size: 256
+  gen_lr: 5.0e-5
+  gen_beta1: 0.5
+  gen_beta2: 0.999
+  disc_lr: 1.0e-4
+  disc_beta1: 0.5
+  disc_beta2: 0.999
+  weight_decay: 1.0e-5
+  grad_clip: 1.0
+  lambda_adv_start: 0.01
+  lambda_adv_end: 0.1
+  lambda_warmup_steps: 10000
+  disc_steps_per_gen: 1
+  gen_horizon: 4
+  pretrained_gen_path: "$WORK/checkpoints/d4head/stage2_best.pt"
+  val_every: 1
+  save_every: 5
+  seed: 42

@@ -1,0 +1,31 @@
+_base_: base.yaml
+
+# Track B: flow matching. H=30 frame (1 s) windows, rectified-flow objective,
+# non-AR within the window, AR sliding between windows. Compared head-to-head
+# with Track A (stage 2/3 transformer + adversarial) on the same reference
+# clip and per-dim std-ratio metrics.
+
+fm:
+  epochs: 100
+  batch_size: 128
+  lr: 1.0e-4
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 1.0e-5
+  grad_clip: 1.0
+  window_size: 30
+  t_sampling: "uniform"          # switch to "logit_normal" after initial run
+  nfe_inference: 4
+  time_embed_dim: 64
+  val_every: 1
+  save_every: 5
+  patience: 10
+  seed: 42
+  use_cosine_lr: true
+  cosine_lr_min_ratio: 0.1
+  eval_n_samples: 4
+
+# Reuse Stage 2's ref-clip config so Track A / Track B evaluate on the same
+# audio + GT — enables apples-to-apples comparison in wandb reports.
+stage2:
+  ref_clip_audio_path: "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/2_scott_0_8_8.wav"
