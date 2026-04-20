@@ -5,13 +5,21 @@ _gt.npy, .wav) and renders them as FLAME meshes with the source audio muxed in.
 This is explicitly NOT run automatically after inference — invoke it only when
 you want a video artifact from a specific run.
 
-Typical invocation (Linux / Jetson — headless OpenGL):
+Two rendering backends are available:
 
-    PYOPENGL_PLATFORM=egl python viewer/export_video.py \
+  * `--backend pyrender` — GPU offscreen via pyrender. Needs OpenGL access:
+    `PYOPENGL_PLATFORM=egl` on NVIDIA headless with DRI permissions, or `=osmesa`
+    with OSMesa libraries installed.
+  * `--backend cpu` — pure software rasterizer (matplotlib Agg + PolyCollection
+    with painter's algorithm + backface cull). No OpenGL required. Slower but
+    reliable on TACC compute nodes that block `/dev/dri/*`.
+  * `--backend auto` (default) — try pyrender first, fall back to cpu on failure.
+
+Typical invocation on a headless compute node:
+
+    python viewer/export_video.py \
         --sequence viewer/static/sequences/test_sequence.npy \
         --output test_sequence.mp4
-
-If EGL is unavailable, try `PYOPENGL_PLATFORM=osmesa` (requires OSMesa install).
 """
 
 import argparse
@@ -31,15 +39,20 @@ from viewer.export_flame_mesh import load_flame_model
 DEFAULT_FLAME_PATH = os.path.expandvars("$WORK/models/flame/generic_model.pkl")
 
 
+def _camera_params(template_verts: np.ndarray) -> tuple[np.ndarray, float]:
+    """Return (centroid, cam_dist) used by both backends so their framing matches."""
+    centroid = template_verts.mean(axis=0).astype(np.float32)
+    extent = float((template_verts.max(axis=0) - template_verts.min(axis=0)).max())
+    cam_dist = 2.5 * extent
+    return centroid, cam_dist
+
+
 def _build_scene(template_verts: np.ndarray, resolution: int):
     """Create a pyrender scene framed on the FLAME template bounding box."""
     import pyrender
 
     scene = pyrender.Scene(ambient_light=[0.4, 0.4, 0.4], bg_color=[1.0, 1.0, 1.0])
-
-    centroid = template_verts.mean(axis=0)
-    extent = float((template_verts.max(axis=0) - template_verts.min(axis=0)).max())
-    cam_dist = 2.5 * extent
+    centroid, cam_dist = _camera_params(template_verts)
 
     camera = pyrender.PerspectiveCamera(yfov=np.pi / 6.0)
     camera_pose = np.eye(4)
@@ -59,9 +72,9 @@ def _build_scene(template_verts: np.ndarray, resolution: int):
     return scene, renderer
 
 
-def _render_frames(expr: np.ndarray, decoder: FLAMEDecoder, faces: np.ndarray,
-                   scene, renderer) -> np.ndarray:
-    """Render a sequence of FLAME expression params to an RGB frame stack."""
+def _render_frames_pyrender(expr: np.ndarray, decoder: FLAMEDecoder, faces: np.ndarray,
+                            scene, renderer) -> np.ndarray:
+    """Render a sequence of FLAME expression params to an RGB frame stack (GPU path)."""
     import pyrender
     import torch
     import trimesh
@@ -78,6 +91,87 @@ def _render_frames(expr: np.ndarray, decoder: FLAMEDecoder, faces: np.ndarray,
             color, _ = renderer.render(scene)
             frames[i] = color
             scene.remove_node(node)
+    return frames
+
+
+def _render_frames_cpu(expr: np.ndarray, decoder: FLAMEDecoder, faces: np.ndarray,
+                      template: np.ndarray, resolution: int) -> np.ndarray:
+    """CPU rasterizer — matplotlib Agg + PolyCollection with painter's algorithm.
+
+    No OpenGL required. Appropriate for headless compute nodes without DRI access.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import PolyCollection
+    import torch
+
+    centroid, cam_dist = _camera_params(template)
+    eye = centroid.copy()
+    eye[2] += cam_dist
+    fov_y = np.pi / 6.0
+    focal = 1.0 / np.tan(fov_y / 2)
+    W = H = resolution
+
+    dpi = 100
+    fig = plt.figure(figsize=(W / dpi, H / dpi), dpi=dpi)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, W)
+    ax.set_ylim(H, 0)
+    ax.set_facecolor("white")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    T = expr.shape[0]
+    frames = np.empty((T, H, W, 3), dtype=np.uint8)
+
+    with torch.no_grad():
+        for i in range(T):
+            params = torch.from_numpy(expr[i:i + 1]).float()
+            verts = decoder.expression_to_vertices(params)[0].cpu().numpy()
+
+            # Perspective project: camera at (centroid + z*cam_dist) looking -Z
+            v_cam = verts - eye
+            z_safe = np.where(np.abs(v_cam[:, 2]) < 1e-6, -1e-6, v_cam[:, 2])
+            x_pix = ((v_cam[:, 0] * focal / (-z_safe)) + 1.0) * 0.5 * W
+            y_pix = (1.0 - ((v_cam[:, 1] * focal / (-z_safe)) + 1.0) * 0.5) * H
+            z_eye = -v_cam[:, 2]
+
+            # Face normals & Lambertian shade (light colocated with camera at +Z).
+            v0 = verts[faces[:, 0]]
+            v1 = verts[faces[:, 1]]
+            v2 = verts[faces[:, 2]]
+            n = np.cross(v1 - v0, v2 - v0)
+            n_norm = np.linalg.norm(n, axis=1, keepdims=True) + 1e-9
+            n_unit = n / n_norm
+            visible = n_unit[:, 2] > 0
+            shade = np.clip(n_unit[:, 2], 0.0, 1.0)
+
+            # Painter's algorithm — draw far triangles first.
+            z_centroid = (z_eye[faces[:, 0]] + z_eye[faces[:, 1]] + z_eye[faces[:, 2]]) / 3
+            vis_idx = np.where(visible)[0]
+            order = vis_idx[np.argsort(-z_centroid[vis_idx])]
+
+            triangles = np.stack([
+                np.stack([x_pix[faces[:, 0]], y_pix[faces[:, 0]]], axis=1),
+                np.stack([x_pix[faces[:, 1]], y_pix[faces[:, 1]]], axis=1),
+                np.stack([x_pix[faces[:, 2]], y_pix[faces[:, 2]]], axis=1),
+            ], axis=1)[order]
+            s = shade[order] * 0.75 + 0.2
+            colors = np.stack([s, s, s], axis=1)
+
+            for coll in list(ax.collections):
+                coll.remove()
+            pc = PolyCollection(triangles, facecolors=colors, edgecolors="none",
+                                linewidths=0)
+            ax.add_collection(pc)
+            fig.canvas.draw()
+            buf = np.asarray(fig.canvas.buffer_rgba())[..., :3]
+            frames[i] = buf.copy()
+
+    plt.close(fig)
     return frames
 
 
@@ -158,16 +252,12 @@ def main():
                         help="Output framerate (default 30, matches dataset).")
     parser.add_argument("--layout", type=str, default="side_by_side",
                         choices=["side_by_side", "stacked", "pred_only"])
+    parser.add_argument("--backend", type=str, default="auto",
+                        choices=["auto", "pyrender", "cpu"],
+                        help="Render backend. 'auto' tries pyrender then falls back to cpu.")
     parser.add_argument("--no_audio", action="store_true",
                         help="Skip the audio mux even if a .wav is present.")
     args = parser.parse_args()
-
-    if os.environ.get("PYOPENGL_PLATFORM") is None:
-        warnings.warn(
-            "PYOPENGL_PLATFORM is unset. Offscreen rendering on Jetson/cluster usually "
-            "needs PYOPENGL_PLATFORM=egl (or =osmesa as a fallback).",
-            stacklevel=1,
-        )
 
     seq_path = Path(args.sequence)
     if not seq_path.exists():
@@ -203,16 +293,46 @@ def main():
 
     decoder = FLAMEDecoder(args.flame_path, device="cpu")
 
-    scene, renderer = _build_scene(template, args.resolution)
+    scene = None
+    renderer = None
+    backend = args.backend
+    if backend in ("auto", "pyrender"):
+        if backend == "auto" and os.environ.get("PYOPENGL_PLATFORM") is None:
+            print("PYOPENGL_PLATFORM unset; skipping pyrender and going straight to cpu.")
+            backend = "cpu"
+        else:
+            try:
+                scene, renderer = _build_scene(template, args.resolution)
+                backend = "pyrender"
+            except Exception as e:
+                if args.backend == "pyrender":
+                    raise
+                warnings.warn(
+                    f"pyrender init failed ({type(e).__name__}: {e}); "
+                    "falling back to cpu renderer.",
+                    stacklevel=1,
+                )
+                backend = "cpu"
+
+    print(f"Backend:  {backend}")
+
     try:
         print("Rendering prediction...")
-        pred_frames = _render_frames(pred, decoder, faces, scene, renderer)
+        if backend == "pyrender":
+            pred_frames = _render_frames_pyrender(pred, decoder, faces, scene, renderer)
+        else:
+            pred_frames = _render_frames_cpu(pred, decoder, faces, template, args.resolution)
+
         gt_frames = None
         if gt is not None:
             print("Rendering ground truth...")
-            gt_frames = _render_frames(gt, decoder, faces, scene, renderer)
+            if backend == "pyrender":
+                gt_frames = _render_frames_pyrender(gt, decoder, faces, scene, renderer)
+            else:
+                gt_frames = _render_frames_cpu(gt, decoder, faces, template, args.resolution)
     finally:
-        renderer.delete()
+        if renderer is not None:
+            renderer.delete()
 
     print("Compositing frames...")
     frames = _compose_and_label(pred_frames, gt_frames, layout)
