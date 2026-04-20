@@ -1,5 +1,7 @@
-torch>=2.1.0
-torchaudio>=2.1.0
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch>=2.6
+torchaudio>=2.6
+torchvision
 numpy<2
 scipy
 h5py
@@ -10,7 +12,7 @@ tqdm
 scikit-learn
 matplotlib
 wandb
-transformers>=4.30,<4.46
+transformers>=4.40
 huggingface_hub
 trimesh
 pyrender
@@ -18,3 +20,4 @@ imageio>=2.31
 imageio-ffmpeg>=0.4.9
 fastapi
 uvicorn[standard]
+nvidia-cuda-nvrtc-cu12

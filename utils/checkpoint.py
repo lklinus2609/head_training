@@ -90,6 +90,25 @@ def load_checkpoint(
     return ckpt
 
 
+def save_inference_checkpoint(path: str, model, config: dict, epoch: int | None = None, val_loss: float | None = None):
+    """Save a lean, inference-only checkpoint.
+
+    Drops optimizer state, discriminator, and RNG snapshots that full training
+    checkpoints carry. Matches the schema produced by
+    scripts/export_inference_checkpoint.py so inference code can load either.
+    """
+    model_to_save = model.module if isinstance(model, DDP) else model
+    state = {
+        "generator_model": model_to_save.state_dict(),
+        "epoch": epoch,
+        "val_loss": val_loss,
+        "config": config,
+        "source_stage": None,
+    }
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    torch.save(state, path)
+
+
 def find_latest_checkpoint(checkpoint_dir: str, prefix: str = "checkpoint") -> str | None:
     """Find the most recent checkpoint in the most recent run folder.
 

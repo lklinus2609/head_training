@@ -1,0 +1,62 @@
+_base_: base.yaml
+
+# Parallel experimental track for the L1 mean-regression plateau.
+#
+# The canonical stage2_pretrain.yaml recipe converges at L1 ≈ 0.31 but
+# exhibits the expected "averaging out" failure: L1 is minimised at the
+# conditional median of the one-to-many audio → expression mapping, so the
+# model sits on that median everywhere and drops expressive detail.
+#
+# Velocity / acceleration / per-dim std matching attack symptoms (smoothness,
+# per-dim amplitude) but not the root cause. This config adds two losses
+# that attack what remains:
+#
+#   lambda_spec: L1 on |FFT(pred)| vs |FFT(target)| per-dim along time.
+#     Time-domain L1 under-weights high-frequency motion (low spectral mass).
+#     Matching magnitude spectra pressures high-frequency expression content
+#     (lip closures, fast jaw motion, blinks) back to data levels.
+#
+#   lambda_cov: L1 on per-sample cross-dim covariance. Diagonal variance
+#     matching enforces per-dim amplitude but lets the off-diagonal
+#     correlations collapse. Covariance matching enforces coordinated
+#     multi-dim motion (jaw / lip co-movement during phonemes).
+#
+# Both are fully batched, no sequential cost, no inference-path change.
+# Initial weights are educated guesses: expect to retune after the first
+# curve. Keep L1 dominant so the model doesn't "cheat" by generating
+# high-spectrum noise.
+stage2:
+  epochs: 500
+  batch_size: 128
+  lr: 1.0e-4
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 1.0e-5
+  grad_clip: 1.0
+  gen_horizon: 4
+  val_every: 1
+  save_every: 5
+  patience: 10
+  seed: 42
+  # Short-horizon variance matching (kept from canonical recipe).
+  lambda_var: 0.05
+  lambda_var_warmup_epochs: 40
+  lambda_var_decay_epochs: 40
+  # Direct temporal losses — primary damping/jitter mitigations.
+  lambda_vel: 0.5
+  lambda_accel: 0.25
+  # New: spectral + covariance matching.
+  lambda_spec: 0.25
+  lambda_cov: 0.1
+  # Sequential paths (off).
+  p_drift_start: 0.0
+  p_drift_end: 0.0
+  p_drift_warmup_epochs: 0
+  lambda_var_full: 0.0
+  lambda_var_full_start: 0
+  lambda_var_full_decay_epochs: 0
+  ref_clip_audio_path: "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/2_scott_0_8_8.wav"
+  use_cosine_lr: true
+  cosine_lr_min_ratio: 0.1
+  use_bf16: true
+  use_compile: false

@@ -13,7 +13,9 @@ from evaluation.ref_clip import (
 )
 from training.losses import (
     acceleration_loss,
+    covariance_loss,
     l1_reconstruction_loss,
+    spectral_loss,
     variance_matching_loss,
     velocity_loss,
 )
@@ -260,6 +262,26 @@ class Stage2Trainer:
                 else:
                     accel_loss = torch.zeros((), device=pred.device)
 
+                # Spectral magnitude L1: pressures high-frequency motion content
+                # that time-domain L1 under-weights. Attacks the "averaging out"
+                # failure mode directly without changing the inference path.
+                lambda_spec = self.config.stage2.lambda_spec
+                if lambda_spec > 0.0:
+                    spec_loss = spectral_loss(pred, target, self.dim_weights)
+                    loss = loss + lambda_spec * spec_loss
+                else:
+                    spec_loss = torch.zeros((), device=pred.device)
+
+                # Cross-dim covariance L1: enforces coordinated multi-dim
+                # motion (jaw-lip, etc.) that the diagonal variance match
+                # leaves unconstrained.
+                lambda_cov = self.config.stage2.lambda_cov
+                if lambda_cov > 0.0:
+                    cov_loss = covariance_loss(pred, target)
+                    loss = loss + lambda_cov * cov_loss
+                else:
+                    cov_loss = torch.zeros((), device=pred.device)
+
                 # Optional late-stage full-rollout variance matching. Sequential
                 # (p_drift=1.0 path) so only enable when velocity/accel losses
                 # aren't enough to keep per-dim spread calibrated.
@@ -300,10 +322,14 @@ class Stage2Trainer:
                             "stage2/train_var": var_loss.item(),
                             "stage2/train_vel": vel_loss.item(),
                             "stage2/train_accel": accel_loss.item(),
+                            "stage2/train_spec": spec_loss.item(),
+                            "stage2/train_cov": cov_loss.item(),
                             "stage2/train_var_full": var_full_loss.item(),
                             "stage2/lambda_var_eff": lambda_var,
                             "stage2/lambda_vel_eff": lambda_vel,
                             "stage2/lambda_accel_eff": lambda_accel,
+                            "stage2/lambda_spec_eff": lambda_spec,
+                            "stage2/lambda_cov_eff": lambda_cov,
                             "stage2/lambda_var_full_eff": lambda_var_full,
                             "stage2/p_drift_eff": p_drift,
                             "stage2/lr": self.optimizer.param_groups[0]["lr"],

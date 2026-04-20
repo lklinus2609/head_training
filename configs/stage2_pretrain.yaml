@@ -33,6 +33,10 @@ stage2:
   # Direct temporal losses — primary damping/jitter mitigations.
   lambda_vel: 0.5
   lambda_accel: 0.25
+  # Spectral + covariance losses (default off; see stage2_pretrain_spec.yaml
+  # for the parallel experimental track that enables them).
+  lambda_spec: 0.0
+  lambda_cov: 0.0
   # Sequential paths (off by default).
   p_drift_start: 0.0
   p_drift_end: 0.0

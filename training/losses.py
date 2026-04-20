@@ -95,6 +95,75 @@ def acceleration_loss(
     return l1_reconstruction_loss(pred_accel, target_accel, dim_weights)
 
 
+def spectral_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    dim_weights: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """L1 on the magnitude spectrum of per-dim frame sequences.
+
+    Time-domain L1 under-weights high-frequency motion because fast motion
+    carries little mass in the total absolute error — a perfectly smoothed
+    prediction already reaches a low L1. Matching `|FFT(pred)|` to
+    `|FFT(target)|` along the time axis directly pressures the model to
+    reproduce high-frequency motion content (lip closures, fast jaw motion,
+    blinks) that a L1-at-the-median solution discards.
+
+    Phase is dropped intentionally: enforcing exact phase overlaps with the
+    velocity / acceleration L1 terms. The magnitude-only variant specifically
+    asks "is motion of the right frequencies present?" rather than "is it at
+    the exact right frame?".
+
+    For T=60 @ 30 fps this gives 31 rFFT bins covering 0–15 Hz, which is
+    the band that matters for face motion.
+
+    Args:
+        pred: Predicted expressions [B, T, D].
+        target: Ground truth expressions [B, T, D].
+        dim_weights: Per-dim weights [D], typically the same inverse-std
+            weights applied to L1 reconstruction.
+    """
+    if pred.shape[1] < 2:
+        return torch.zeros((), device=pred.device)
+    # FFT along the time axis. Cast to float32 so the FFT is numerically
+    # stable under bf16 autocast.
+    pred_f = pred.float().transpose(1, 2)       # [B, D, T]
+    target_f = target.float().transpose(1, 2)   # [B, D, T]
+    pred_mag = torch.fft.rfft(pred_f, dim=-1).abs()       # [B, D, T//2+1]
+    target_mag = torch.fft.rfft(target_f, dim=-1).abs()   # [B, D, T//2+1]
+    per_dim_loss = torch.abs(pred_mag - target_mag).mean(dim=-1)  # [B, D]
+    if dim_weights is not None:
+        per_dim_loss = per_dim_loss * dim_weights
+    return per_dim_loss.mean()
+
+
+def covariance_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+) -> torch.Tensor:
+    """L1 on the per-sample cross-dim covariance matrix.
+
+    Complements the diagonal variance-matching loss: variance matching
+    enforces per-dim amplitude, but leaves off-diagonal terms unconstrained.
+    FLAME dims are strongly correlated during speech (jaw-open co-moves with
+    lip-part, etc.), so a model that collapses to independent per-dim medians
+    loses the multi-dim *coordination* that makes a phoneme look like a
+    phoneme. This term pressures predicted dims to co-move like the targets.
+
+    Args:
+        pred: Predicted expressions [B, T, D].
+        target: Ground truth expressions [B, T, D].
+    """
+    if pred.shape[1] < 2:
+        return torch.zeros((), device=pred.device)
+    T = pred.shape[1]
+    pred_c = pred - pred.mean(dim=1, keepdim=True)         # [B, T, D]
+    target_c = target - target.mean(dim=1, keepdim=True)   # [B, T, D]
+    pred_cov = torch.matmul(pred_c.transpose(1, 2), pred_c) / T      # [B, D, D]
+    target_cov = torch.matmul(target_c.transpose(1, 2), target_c) / T  # [B, D, D]
+    return torch.abs(pred_cov - target_cov).mean()
+
+
 def discriminator_loss(
     real_score: torch.Tensor,
     fake_score: torch.Tensor,

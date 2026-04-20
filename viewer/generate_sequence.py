@@ -56,6 +56,8 @@ def generate_from_model(
     output_path: str,
     config_path: str = None,
     mode: str = "sliding",
+    fp16: bool = False,
+    kv_cache: bool = False,
 ):
     """Run model inference on audio and save expression sequence."""
     import torch
@@ -64,6 +66,7 @@ def generate_from_model(
     from configs_schema import load_config
     from data.audio_features import extract_mel, extract_wav2vec
     from models.generator import Generator
+    from models.generator_inference import GeneratorInference
 
     # Load config from checkpoint
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
@@ -95,6 +98,11 @@ def generate_from_model(
 
     generator.load_state_dict(ckpt["generator_model"])
     generator.eval()
+
+    # Optional KV-cache inference model (for AR modes; teacher mode still uses training model)
+    gen_infer = None
+    if kv_cache and mode in ("sliding", "autoregressive"):
+        gen_infer = GeneratorInference.from_training_generator(generator).to(device)
 
     # Load and process audio
     waveform, sr = sf.read(audio_path)
@@ -158,15 +166,25 @@ def generate_from_model(
                 gt_norm = gt_raw
             gt_norm = gt_norm.unsqueeze(0)  # [1, T, 100]
 
-    print(f"Inference mode: {mode} (H={H}, P={P}, C={C}, F={F})")
+    use_autocast = fp16 and device.type == "cuda"
+    print(f"Inference mode: {mode} (H={H}, P={P}, C={C}, F={F}) fp16={use_autocast} kv_cache={gen_infer is not None}")
 
-    with torch.no_grad():
+    autocast_ctx = (
+        torch.autocast(device_type="cuda", dtype=torch.float16)
+        if use_autocast
+        else torch.autocast(device_type="cpu", enabled=False)
+    )
+
+    with torch.no_grad(), autocast_ctx:
         if mode == "sliding":
             # Sliding window: predict H frames at a time, use own predictions as context
             for t in range(0, T, H):
                 chunk_len = min(H, T - t)
                 audio_chunk = audio_tensor[:, t:t + C + chunk_len + F]
-                pred = generator(audio_chunk, emotion_tensor, prev_expr, target_expression=None, max_len=chunk_len)
+                if gen_infer is not None:
+                    pred = gen_infer(audio_chunk, emotion_tensor, prev_expr, max_len=chunk_len)
+                else:
+                    pred = generator(audio_chunk, emotion_tensor, prev_expr, target_expression=None, max_len=chunk_len)
                 all_expressions.append(pred.cpu())
                 # Update prev_expr, keeping exactly P frames
                 prev_expr = torch.cat([prev_expr, pred], dim=1)[:, -P:]
@@ -194,7 +212,10 @@ def generate_from_model(
                 end = min(start + seq_len, T)
                 chunk_len = end - start
                 audio_chunk = audio_tensor[:, start:start + C + chunk_len + F]
-                pred = generator(audio_chunk, emotion_tensor, prev_expr, target_expression=None, max_len=chunk_len)
+                if gen_infer is not None:
+                    pred = gen_infer(audio_chunk, emotion_tensor, prev_expr, max_len=chunk_len)
+                else:
+                    pred = generator(audio_chunk, emotion_tensor, prev_expr, target_expression=None, max_len=chunk_len)
                 all_expressions.append(pred.cpu())
                 prev_expr = torch.cat([prev_expr, pred], dim=1)[:, -P:]
 
@@ -260,6 +281,10 @@ def main():
                         choices=["sliding", "teacher", "autoregressive"],
                         help="Inference mode: sliding (H-frame windows, default), "
                              "teacher (GT context, eval only), autoregressive (legacy frame-by-frame)")
+    parser.add_argument("--fp16", action="store_true",
+                        help="Run inference under torch.autocast(float16) on CUDA. Ignored on CPU.")
+    parser.add_argument("--kv_cache", action="store_true",
+                        help="Use KV-cached inference generator for AR modes (sliding, autoregressive).")
     args = parser.parse_args()
 
     if args.demo:
@@ -267,7 +292,8 @@ def main():
     else:
         if not args.checkpoint or not args.audio:
             parser.error("--checkpoint and --audio are required when not using --demo")
-        generate_from_model(args.checkpoint, args.audio, args.emotion, args.output, args.config, args.mode)
+        generate_from_model(args.checkpoint, args.audio, args.emotion, args.output,
+                            args.config, args.mode, args.fp16, args.kv_cache)
 
 
 if __name__ == "__main__":

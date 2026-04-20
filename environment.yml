@@ -1,15 +1,15 @@
 name: d4head
+# Unified env for all NVIDIA GPU nodes we target:
+#   - LS6 gpu-a100         (A100, SM 8.0)
+#   - Stampede3 h100       (H100, SM 9.0)
+#   - Stampede3 amd-rtx    (RTX Pro 6000 Blackwell, SM 12.0)
+# Uses PyTorch cu128 wheels so a single env covers all three archs.
+# Requires NVIDIA driver >=550 on the compute node (check `nvidia-smi`).
 channels:
-  - pytorch
-  - nvidia/label/cuda-11.8.0
   - conda-forge
   - defaults
 dependencies:
-  - python=3.10
-  - pytorch=2.1.*
-  - torchaudio
-  - torchvision
-  - pytorch-cuda=11.8
+  - python=3.11
   - numpy<2
   - scipy
   - h5py
@@ -22,8 +22,13 @@ dependencies:
   - matplotlib
   - pip
   - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch>=2.6
+      - torchaudio>=2.6
+      - torchvision
+      - nvidia-cuda-nvrtc-cu12
       - wandb
-      - transformers>=4.30,<4.46
+      - transformers>=4.40
       - huggingface_hub
       - trimesh
       - pyrender

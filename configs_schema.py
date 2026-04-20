@@ -100,6 +100,13 @@ class Stage2Config:
     # damping (velocity) and frame-to-frame jitter (acceleration). Default 0.
     lambda_vel: float = 0.0
     lambda_accel: float = 0.0
+    # Spectral magnitude L1 and cross-dim covariance L1. Attack the residual
+    # "L1-at-the-median" damping: spectral pressures high-frequency motion
+    # content the time-domain L1 under-weights; covariance pressures
+    # coordinated multi-dim motion the diagonal variance match misses. Both
+    # fully batched, no sequential cost, no inference-path change.
+    lambda_spec: float = 0.0
+    lambda_cov: float = 0.0
     # Quality-neutral GPU-efficiency toggles.
     # use_bf16: wrap generator forward + loss computation in bfloat16 autocast.
     #   A100 native bf16 tensor cores; same range as fp32 so no GradScaler
