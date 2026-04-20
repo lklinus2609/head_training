@@ -169,6 +169,18 @@ class FMConfig:
 
 
 @dataclass
+class ResidualFMConfig:
+    """Residual flow-matching config (Track C).
+
+    Trains the FM generator on residuals against a frozen stage-2 transformer.
+    The deterministic head owns audio-correlated lip/jaw motion; the FM only
+    captures what stage 2 couldn't predict — blinks, idle motion, and other
+    audio-orthogonal variation. Reuses the `fm:` section for hyperparameters.
+    """
+    frozen_stage2_checkpoint: str = ""
+
+
+@dataclass
 class TrainConfig:
     paths: PathConfig = field(default_factory=PathConfig)
     data: DataConfig = field(default_factory=DataConfig)
@@ -177,6 +189,7 @@ class TrainConfig:
     stage2: Stage2Config = field(default_factory=Stage2Config)
     stage3: Stage3Config = field(default_factory=Stage3Config)
     fm: FMConfig = field(default_factory=FMConfig)
+    residual_fm: ResidualFMConfig = field(default_factory=ResidualFMConfig)
     wandb_project: str = "d4-head-facial-motion"
     wandb_entity: str = ""
 

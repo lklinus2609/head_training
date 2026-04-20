@@ -1,0 +1,38 @@
+_base_: base.yaml
+
+# Track C: residual flow matching. Decompose x_gt = x_det + x_res where
+# x_det is predicted by a frozen stage-2 transformer (audio-correlated lip/jaw
+# motion). The FM learns only the audio-orthogonal residual x_res — blinks,
+# idle motion, personal tics that stage 2 can't predict from audio alone.
+#
+# Pre-requisite: run `python scripts/compute_residual_stats.py --config
+# configs/residual_fm.yaml` once to populate residual_mean/residual_std in
+# train.h5/stats. The trainer will fail loudly if they're missing.
+
+fm:
+  epochs: 100
+  batch_size: 128
+  lr: 1.0e-4
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 1.0e-5
+  grad_clip: 1.0
+  window_size: 30
+  t_sampling: "uniform"
+  nfe_inference: 4
+  time_embed_dim: 64
+  val_every: 1
+  save_every: 5
+  patience: 10
+  seed: 42
+  use_cosine_lr: true
+  cosine_lr_min_ratio: 0.1
+  eval_n_samples: 4
+
+residual_fm:
+  frozen_stage2_checkpoint: "$WORK/checkpoints/d4head/stage2_best.pt"
+
+# Reuse Stage 2's ref-clip audio path for future eval parity (v1 trainer does
+# not run ref-clip eval — see plan).
+stage2:
+  ref_clip_audio_path: "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/2_scott_0_8_8.wav"
