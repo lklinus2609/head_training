@@ -1,0 +1,42 @@
+_base_: base.yaml
+
+# Track A applied to Stage 2 pretraining:
+# - A2 self-drift (p_drift_*): practises the generator's own prev-frame
+#   context during training so it learns to recover from its own drift at
+#   inference time. Closes the train/inference gap that drives motion-range
+#   damping in long rollouts.
+# - A3 full-rollout variance matching (lambda_var_full*): in the last
+#   stretch of training, runs one full 60-frame AR rollout per batch and
+#   penalises per-dim motion-range mismatch against GT. The original short-
+#   horizon variance-matching (lambda_var) sees a patchwork of GT-prev
+#   4-frame windows and can't punish collapse under self-drift.
+#
+# All other hyperparams match configs/stage2_pretrain.yaml — only the new
+# knobs differ so direct A/B comparison against stage2_best is clean.
+stage2:
+  epochs: 500
+  batch_size: 128
+  lr: 1.0e-4
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 1.0e-5
+  grad_clip: 1.0
+  gen_horizon: 4
+  val_every: 1
+  save_every: 5
+  patience: 10
+  seed: 42
+  lambda_var: 0.05
+  lambda_var_warmup_epochs: 40
+  lambda_var_decay_epochs: 40
+  ref_clip_audio_path: "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/2_scott_0_8_8.wav"
+  use_cosine_lr: true
+  cosine_lr_min_ratio: 0.1
+  # A2: self-drift. Ramp 0.25 → 0.6 over first 100 epochs, then hold.
+  p_drift_start: 0.25
+  p_drift_end: 0.6
+  p_drift_warmup_epochs: 100
+  # A3: full-rollout variance matching. On from epoch 400, fade over final 20.
+  lambda_var_full: 0.2
+  lambda_var_full_start: 400
+  lambda_var_full_decay_epochs: 20
