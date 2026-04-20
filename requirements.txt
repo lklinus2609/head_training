@@ -14,5 +14,7 @@ transformers>=4.30,<4.46
 huggingface_hub
 trimesh
 pyrender
+imageio>=2.31
+imageio-ffmpeg>=0.4.9
 fastapi
 uvicorn[standard]
