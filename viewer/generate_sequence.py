@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -269,7 +270,14 @@ def main():
     parser = argparse.ArgumentParser(description="Generate expression sequences")
     parser.add_argument("--demo", action="store_true",
                         help="Generate a demo sinusoidal sequence for testing")
-    parser.add_argument("--checkpoint", type=str, help="Model checkpoint path")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Model checkpoint path. If omitted, auto-detects the best.pt "
+                             "in the most recent run folder under --checkpoint_dir (falling "
+                             "back to the highest-epoch checkpoint if no best.pt exists).")
+    parser.add_argument("--checkpoint_dir", type=str,
+                        default=os.path.expandvars("$WORK/checkpoints/d4head"),
+                        help="Root directory scanned for the default checkpoint when "
+                             "--checkpoint is not given.")
     parser.add_argument("--config", type=str, default=None, help="Config YAML path (optional)")
     parser.add_argument("--audio", type=str, help="Input audio file path")
     parser.add_argument("--emotion", type=int, default=0, help="Emotion label (0-7)")
@@ -290,9 +298,19 @@ def main():
     if args.demo:
         generate_demo_sequence(args.output, args.duration)
     else:
-        if not args.checkpoint or not args.audio:
-            parser.error("--checkpoint and --audio are required when not using --demo")
-        generate_from_model(args.checkpoint, args.audio, args.emotion, args.output,
+        if not args.audio:
+            parser.error("--audio is required when not using --demo")
+        checkpoint = args.checkpoint
+        if checkpoint is None:
+            from utils.checkpoint import find_latest_best_checkpoint
+            checkpoint = find_latest_best_checkpoint(args.checkpoint_dir)
+            if checkpoint is None:
+                parser.error(
+                    f"--checkpoint not given and no checkpoint found under "
+                    f"{args.checkpoint_dir}. Pass --checkpoint explicitly."
+                )
+            print(f"Using auto-detected checkpoint: {checkpoint}")
+        generate_from_model(checkpoint, args.audio, args.emotion, args.output,
                             args.config, args.mode, args.fp16, args.kv_cache)
 
 

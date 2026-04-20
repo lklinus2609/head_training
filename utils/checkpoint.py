@@ -143,6 +143,54 @@ def find_latest_checkpoint(checkpoint_dir: str, prefix: str = "checkpoint") -> s
     return best_path
 
 
+def find_latest_best_checkpoint(checkpoint_dir: str) -> str | None:
+    """Find the best checkpoint in the most recent run folder, across any prefix.
+
+    Scans `checkpoint_dir` for subdirectories named `<prefix>_YYYYMMDD_HHMM`
+    (stage2, stage3, fm, residual_fm, ...). Picks the newest by timestamp,
+    then returns:
+      1. `<prefix>_best.pt` inside it, if present;
+      2. otherwise the highest-epoch `<prefix>_epoch_XXXX.pt` inside it;
+      3. otherwise None.
+
+    Used by inference scripts to default `--checkpoint` to the latest trained
+    model without requiring the user to know the exact path.
+    """
+    ckpt_dir = Path(checkpoint_dir)
+    if not ckpt_dir.exists():
+        return None
+
+    ts_re = re.compile(r"^(.+)_(\d{8}_\d{4})$")
+    run_dirs = []
+    for d in ckpt_dir.iterdir():
+        if not d.is_dir():
+            continue
+        m = ts_re.match(d.name)
+        if m:
+            run_dirs.append((d, m.group(1), m.group(2)))
+    if not run_dirs:
+        return None
+
+    run_dirs.sort(key=lambda t: t[2], reverse=True)
+    latest_dir, prefix, _ = run_dirs[0]
+
+    best_path = latest_dir / f"{prefix}_best.pt"
+    if best_path.exists():
+        return str(best_path)
+
+    ep_re = re.compile(rf"{re.escape(prefix)}_epoch_(\d+)\.pt")
+    best_epoch = -1
+    best_file = None
+    for f in latest_dir.glob(f"{prefix}_epoch_*.pt"):
+        m = ep_re.match(f.name)
+        if m:
+            epoch = int(m.group(1))
+            if epoch > best_epoch:
+                best_epoch = epoch
+                best_file = str(f)
+    return best_file
+
+
 def create_run_dir(checkpoint_dir: str, prefix: str) -> str:
     """Create a timestamped run directory for checkpoints.
 
