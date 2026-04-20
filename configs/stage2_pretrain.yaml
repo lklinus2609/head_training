@@ -1,5 +1,18 @@
 _base_: base.yaml
 
+# Canonical Stage 2 pretraining recipe. Consolidates prior variants:
+#   - Original L1 + short-horizon variance matching.
+#   - Velocity and acceleration L1 losses (added v2). Directly attack motion
+#     damping and jitter, respectively. Fully batched, no sequential cost.
+#   - bfloat16 autocast + torch.compile. Quality-neutral GPU-efficiency
+#     toggles on A100. ~2-3x throughput vs fp32/eager.
+#
+# The previous `stage2_pretrain_v2.yaml` and `stage2_pretrain_fixed.yaml`
+# variants were removed — their settings live here. Sequential self-drift
+# and full-rollout variance matching are left configurable (default 0) in
+# case they're needed later, but are off by default because they slow
+# training by ~14x for a fraction of the problem FM showed was not AR-
+# exposure-bias-dominant.
 stage2:
   epochs: 500
   batch_size: 128
@@ -13,9 +26,24 @@ stage2:
   save_every: 5
   patience: 10
   seed: 42
+  # Short-horizon variance matching (kept from original).
   lambda_var: 0.05
   lambda_var_warmup_epochs: 40
   lambda_var_decay_epochs: 40
+  # Direct temporal losses — primary damping/jitter mitigations.
+  lambda_vel: 0.5
+  lambda_accel: 0.25
+  # Sequential paths (off by default).
+  p_drift_start: 0.0
+  p_drift_end: 0.0
+  p_drift_warmup_epochs: 0
+  lambda_var_full: 0.0
+  lambda_var_full_start: 0
+  lambda_var_full_decay_epochs: 0
+  # Reference-clip evaluation for best-checkpoint selection + A/B vs FM.
   ref_clip_audio_path: "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/2_scott_0_8_8.wav"
   use_cosine_lr: true
   cosine_lr_min_ratio: 0.1
+  # GPU-efficiency (quality-neutral).
+  use_bf16: true
+  use_compile: true

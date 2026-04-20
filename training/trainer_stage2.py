@@ -1,5 +1,6 @@
 """Stage 2 training loop: generator pretraining with L1 reconstruction loss."""
 
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -46,6 +47,10 @@ class Stage2Trainer:
         self.global_step = 0
         self.best_val_loss = float("inf")
         self.epochs_without_improvement = 0
+
+        self.use_bf16 = getattr(config.stage2, "use_bf16", False) and device.type == "cuda"
+        if self.use_bf16 and is_main_process():
+            print("Using bfloat16 autocast for forward + loss (no GradScaler needed)")
 
         # Reference-clip raw-L1 evaluation for best-checkpoint selection.
         # Loaded once on rank 0 here; _run_ref_inference reuses the tensors each val.
@@ -221,47 +226,52 @@ class Stage2Trainer:
 
             # Short-horizon forward (matches autoregressive inference)
             p_drift = self._effective_p_drift(epoch)
-            pred, target = self._short_horizon_forward(
-                expression, audio, emotion, prev_expr, p_drift=p_drift,
+            autocast_ctx = (
+                torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+                if self.use_bf16 else nullcontext()
             )
-            l1 = l1_reconstruction_loss(pred, target, self.dim_weights)
-            lambda_var = self._effective_lambda_var(epoch)
-            if lambda_var > 0.0:
-                var_loss = variance_matching_loss(pred, target)
-                loss = l1 + lambda_var * var_loss
-            else:
-                var_loss = torch.zeros((), device=pred.device)
-                loss = l1
-
-            # Velocity / acceleration L1. Fully batched — no sequential cost.
-            # Velocity -> directly penalises motion-range damping.
-            # Acceleration -> directly penalises frame-to-frame jitter.
-            lambda_vel = self.config.stage2.lambda_vel
-            if lambda_vel > 0.0:
-                vel_loss = velocity_loss(pred, target, self.dim_weights)
-                loss = loss + lambda_vel * vel_loss
-            else:
-                vel_loss = torch.zeros((), device=pred.device)
-
-            lambda_accel = self.config.stage2.lambda_accel
-            if lambda_accel > 0.0:
-                accel_loss = acceleration_loss(pred, target, self.dim_weights)
-                loss = loss + lambda_accel * accel_loss
-            else:
-                accel_loss = torch.zeros((), device=pred.device)
-
-            # Optional late-stage full-rollout variance matching. Sequential
-            # (p_drift=1.0 path) so only enable in the final stretch when the
-            # velocity/accel losses aren't enough to keep per-dim spread calibrated.
-            lambda_var_full = self._effective_lambda_var_full(epoch)
-            if lambda_var_full > 0.0:
-                full_pred, full_target = self._short_horizon_forward(
-                    expression, audio, emotion, prev_expr, p_drift=1.0,
+            with autocast_ctx:
+                pred, target = self._short_horizon_forward(
+                    expression, audio, emotion, prev_expr, p_drift=p_drift,
                 )
-                var_full_loss = variance_matching_loss(full_pred, full_target)
-                loss = loss + lambda_var_full * var_full_loss
-            else:
-                var_full_loss = torch.zeros((), device=pred.device)
+                l1 = l1_reconstruction_loss(pred, target, self.dim_weights)
+                lambda_var = self._effective_lambda_var(epoch)
+                if lambda_var > 0.0:
+                    var_loss = variance_matching_loss(pred, target)
+                    loss = l1 + lambda_var * var_loss
+                else:
+                    var_loss = torch.zeros((), device=pred.device)
+                    loss = l1
+
+                # Velocity / acceleration L1. Fully batched — no sequential cost.
+                # Velocity -> directly penalises motion-range damping.
+                # Acceleration -> directly penalises frame-to-frame jitter.
+                lambda_vel = self.config.stage2.lambda_vel
+                if lambda_vel > 0.0:
+                    vel_loss = velocity_loss(pred, target, self.dim_weights)
+                    loss = loss + lambda_vel * vel_loss
+                else:
+                    vel_loss = torch.zeros((), device=pred.device)
+
+                lambda_accel = self.config.stage2.lambda_accel
+                if lambda_accel > 0.0:
+                    accel_loss = acceleration_loss(pred, target, self.dim_weights)
+                    loss = loss + lambda_accel * accel_loss
+                else:
+                    accel_loss = torch.zeros((), device=pred.device)
+
+                # Optional late-stage full-rollout variance matching. Sequential
+                # (p_drift=1.0 path) so only enable when velocity/accel losses
+                # aren't enough to keep per-dim spread calibrated.
+                lambda_var_full = self._effective_lambda_var_full(epoch)
+                if lambda_var_full > 0.0:
+                    full_pred, full_target = self._short_horizon_forward(
+                        expression, audio, emotion, prev_expr, p_drift=1.0,
+                    )
+                    var_full_loss = variance_matching_loss(full_pred, full_target)
+                    loss = loss + lambda_var_full * var_full_loss
+                else:
+                    var_full_loss = torch.zeros((), device=pred.device)
 
             # Backward pass
             self.optimizer.zero_grad()

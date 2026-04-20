@@ -100,6 +100,15 @@ class Stage2Config:
     # damping (velocity) and frame-to-frame jitter (acceleration). Default 0.
     lambda_vel: float = 0.0
     lambda_accel: float = 0.0
+    # Quality-neutral GPU-efficiency toggles.
+    # use_bf16: wrap generator forward + loss computation in bfloat16 autocast.
+    #   A100 native bf16 tensor cores; same range as fp32 so no GradScaler
+    #   needed and well within the numerical budget of this model.
+    # use_compile: torch.compile the generator before DDP wrapping. Fuses
+    #   kernels, removes Python/autograd overhead. First iteration pays a
+    #   ~30-60s compile cost; subsequent iterations are 1.3-1.5x faster.
+    use_bf16: bool = False
+    use_compile: bool = False
 
 
 @dataclass

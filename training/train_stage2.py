@@ -118,6 +118,11 @@ def main():
         audio_conv_kernel_sizes=config.generator.audio_conv_kernel_sizes,
     ).to(device)
 
+    if config.stage2.use_compile:
+        if is_main_process():
+            print("Compiling generator with torch.compile (first iteration pays a warmup cost)")
+        generator = torch.compile(generator)
+
     generator = DDP(generator, device_ids=[local_rank])
 
     if is_main_process():
