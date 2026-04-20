@@ -95,6 +95,11 @@ class Stage2Config:
     lambda_var_full: float = 0.0
     lambda_var_full_start: int = 0
     lambda_var_full_decay_epochs: int = 0
+    # Velocity and acceleration L1 losses on the short-horizon prediction.
+    # Cheap (fully batched, no sequential cost); directly attack motion-range
+    # damping (velocity) and frame-to-frame jitter (acceleration). Default 0.
+    lambda_vel: float = 0.0
+    lambda_accel: float = 0.0
 
 
 @dataclass

@@ -1,0 +1,46 @@
+_base_: base.yaml
+
+# Stage 2 v2: dropped sequential self-drift (14x slowdown for modest gain)
+# and sequential full-rollout variance matching in favour of velocity and
+# acceleration L1 losses. These are:
+#   - Fully batched (no sequential cost) — throughput stays at baseline
+#   - Target both failure modes directly:
+#       * velocity  -> penalises motion-range damping (if GT has motion,
+#                      pred must have matching frame-to-frame delta, which
+#                      per-frame L1 alone does not enforce)
+#       * accel     -> penalises frame-to-frame jitter via second-order
+#                      smoothness
+#   - Stronger gradient signal than variance matching (direct per-frame
+#     regression vs. a summary statistic), so convergence is fast
+#
+# Train-from-scratch budget: ~9 hours on 3xA100 at 500 epochs (unchanged
+# from baseline). Finetune from stage2_best.pt takes ~50 epochs / ~1 hour.
+stage2:
+  epochs: 500
+  batch_size: 128
+  lr: 1.0e-4
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 1.0e-5
+  grad_clip: 1.0
+  gen_horizon: 4
+  val_every: 1
+  save_every: 5
+  patience: 10
+  seed: 42
+  lambda_var: 0.05
+  lambda_var_warmup_epochs: 40
+  lambda_var_decay_epochs: 40
+  ref_clip_audio_path: "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/2_scott_0_8_8.wav"
+  use_cosine_lr: true
+  cosine_lr_min_ratio: 0.1
+  # New: direct temporal losses. Fast, no sequential cost.
+  lambda_vel: 0.5
+  lambda_accel: 0.25
+  # Keep sequential paths OFF — opt in explicitly if needed later.
+  p_drift_start: 0.0
+  p_drift_end: 0.0
+  p_drift_warmup_epochs: 0
+  lambda_var_full: 0.0
+  lambda_var_full_start: 0
+  lambda_var_full_decay_epochs: 0

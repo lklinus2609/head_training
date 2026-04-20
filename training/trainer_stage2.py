@@ -10,7 +10,12 @@ from evaluation.ref_clip import (
     compute_ref_metrics,
     prepare_ref_clip,
 )
-from training.losses import l1_reconstruction_loss, variance_matching_loss
+from training.losses import (
+    acceleration_loss,
+    l1_reconstruction_loss,
+    variance_matching_loss,
+    velocity_loss,
+)
 from utils.checkpoint import checkpoint_path, save_checkpoint
 from utils.ddp import is_main_process, reduce_mean
 from utils.logging_utils import log_metrics
@@ -228,10 +233,26 @@ class Stage2Trainer:
                 var_loss = torch.zeros((), device=pred.device)
                 loss = l1
 
-            # Track A3: full-rollout variance matching. Re-run as a sequential
-            # AR rollout (p_drift=1.0) and add a variance-matching term on the
-            # rolled-out sequence — punishes motion collapse under self-drift,
-            # which the short-horizon patchwork cannot. Gated by schedule.
+            # Velocity / acceleration L1. Fully batched — no sequential cost.
+            # Velocity -> directly penalises motion-range damping.
+            # Acceleration -> directly penalises frame-to-frame jitter.
+            lambda_vel = self.config.stage2.lambda_vel
+            if lambda_vel > 0.0:
+                vel_loss = velocity_loss(pred, target, self.dim_weights)
+                loss = loss + lambda_vel * vel_loss
+            else:
+                vel_loss = torch.zeros((), device=pred.device)
+
+            lambda_accel = self.config.stage2.lambda_accel
+            if lambda_accel > 0.0:
+                accel_loss = acceleration_loss(pred, target, self.dim_weights)
+                loss = loss + lambda_accel * accel_loss
+            else:
+                accel_loss = torch.zeros((), device=pred.device)
+
+            # Optional late-stage full-rollout variance matching. Sequential
+            # (p_drift=1.0 path) so only enable in the final stretch when the
+            # velocity/accel losses aren't enough to keep per-dim spread calibrated.
             lambda_var_full = self._effective_lambda_var_full(epoch)
             if lambda_var_full > 0.0:
                 full_pred, full_target = self._short_horizon_forward(
@@ -267,8 +288,12 @@ class Stage2Trainer:
                             "stage2/train_loss": loss.item(),
                             "stage2/train_l1": l1.item(),
                             "stage2/train_var": var_loss.item(),
+                            "stage2/train_vel": vel_loss.item(),
+                            "stage2/train_accel": accel_loss.item(),
                             "stage2/train_var_full": var_full_loss.item(),
                             "stage2/lambda_var_eff": lambda_var,
+                            "stage2/lambda_vel_eff": lambda_vel,
+                            "stage2/lambda_accel_eff": lambda_accel,
                             "stage2/lambda_var_full_eff": lambda_var_full,
                             "stage2/p_drift_eff": p_drift,
                             "stage2/lr": self.optimizer.param_groups[0]["lr"],

@@ -45,6 +45,56 @@ def variance_matching_loss(
     return ((pred_std - gt_std) ** 2).mean()
 
 
+def velocity_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    dim_weights: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """L1 on first-order frame-to-frame differences.
+
+    Pressures the prediction's velocity to track GT velocity. Directly
+    attacks motion-range damping: if GT has motion, pred must produce
+    matching motion to minimize this loss — L1-on-position alone does not
+    enforce this because a slowly-drifting damped prediction can still
+    have low per-frame L1.
+
+    Args:
+        pred: Predicted expressions [B, T, D].
+        target: Ground truth expressions [B, T, D].
+        dim_weights: Per-dim weights [D], typically the same inverse-std
+            weights applied to L1 reconstruction.
+    """
+    if pred.shape[1] < 2:
+        return torch.zeros((), device=pred.device)
+    pred_vel = pred[:, 1:] - pred[:, :-1]
+    target_vel = target[:, 1:] - target[:, :-1]
+    return l1_reconstruction_loss(pred_vel, target_vel, dim_weights)
+
+
+def acceleration_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    dim_weights: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """L1 on second-order frame-to-frame differences.
+
+    Pressures predicted acceleration to match GT. Directly attacks
+    jitter: a noisy prediction has large acceleration magnitudes even if
+    it tracks the GT mean, so this term penalises frame-to-frame
+    discontinuities that velocity alone does not catch.
+
+    Args:
+        pred: Predicted expressions [B, T, D].
+        target: Ground truth expressions [B, T, D].
+        dim_weights: Per-dim weights [D].
+    """
+    if pred.shape[1] < 3:
+        return torch.zeros((), device=pred.device)
+    pred_accel = pred[:, 2:] - 2 * pred[:, 1:-1] + pred[:, :-2]
+    target_accel = target[:, 2:] - 2 * target[:, 1:-1] + target[:, :-2]
+    return l1_reconstruction_loss(pred_accel, target_accel, dim_weights)
+
+
 def discriminator_loss(
     real_score: torch.Tensor,
     fake_score: torch.Tensor,
