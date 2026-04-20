@@ -46,6 +46,11 @@ def main():
     args = parse_args()
     config = load_config(args.config)
 
+    # Enable TF32 tensor cores for fp32 matmul (the ops autocast keeps in fp32,
+    # e.g. LayerNorm). Free speedup on A100, no accuracy regression at this
+    # model scale. Silences torch.compile's TF32 warning even when compile is off.
+    torch.set_float32_matmul_precision("high")
+
     # DDP setup
     local_rank = setup_ddp()
     rank = get_rank()

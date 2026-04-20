@@ -46,4 +46,8 @@ stage2:
   cosine_lr_min_ratio: 0.1
   # GPU-efficiency (quality-neutral).
   use_bf16: true
-  use_compile: true
+  # torch.compile disabled: PyTorch 2.1's dynamo can't handle
+  # nn.MultiheadAttention's internal sizes() calls when multiple input shapes
+  # are encountered (e.g. the last ref-inference chunk has max_len=1 vs
+  # training's max_len=H=4). bf16 + TF32 recover most of the speedup anyway.
+  use_compile: false
