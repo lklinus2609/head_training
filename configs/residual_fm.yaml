@@ -32,7 +32,7 @@ fm:
 residual_fm:
   frozen_stage2_checkpoint: "$WORK/checkpoints/d4head/stage2_best.pt"
 
-# Reuse Stage 2's ref-clip audio path for future eval parity (v1 trainer does
-# not run ref-clip eval — see plan).
+# Ref-clip eval: stage 2 AR-slide (deterministic) + best-of-K FM samples for
+# residual, then sum — apples-to-apples against Track A and Track B.
 stage2:
   ref_clip_audio_path: "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/2_scott_0_8_8.wav"

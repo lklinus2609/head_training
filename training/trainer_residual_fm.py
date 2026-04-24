@@ -21,6 +21,11 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
+from evaluation.ref_clip import (
+    ar_slide_inference,
+    compute_ref_metrics,
+    fm_slide_inference,
+)
 from training.trainer_fm import FMTrainer
 from utils.checkpoint import checkpoint_path, save_checkpoint
 from utils.ddp import is_main_process
@@ -54,9 +59,9 @@ class ResidualFMTrainer(FMTrainer):
             wandb_run=wandb_run,
             dim_weights=dim_weights,
         )
-        # Ref-clip eval requires summing stage2_pred + residual_sample — wiring
-        # planned for a follow-up. V1 reports val loss only.
-        self.ref_clip = None
+        # Parent sets self.ref_clip via prepare_ref_clip. Residual-FM ref eval
+        # runs stage-2 AR-slide once for the deterministic component, then
+        # best-of-K FM samples for the residual, then sums.
 
         self.frozen_stage2 = frozen_stage2
         self.frozen_stage2.eval()
@@ -202,6 +207,70 @@ class ResidualFMTrainer(FMTrainer):
                 run=self.wandb_run,
             )
             print(f"  Val Residual FM Loss: {avg_loss:.4f}")
+
+        if self.ref_clip is not None:
+            # Stage 2 is deterministic — run once outside the best-of-K loop.
+            stage2_pred_norm = ar_slide_inference(
+                self.frozen_stage2,
+                self.ref_clip,
+                horizon=self.config.stage2.gen_horizon,
+                context_past=self.config.data.context_past,
+                context_future=self.config.data.context_future,
+                prev_frames=self.config.data.prev_frames,
+                expr_dim=self.config.data.flame_expr_dim,
+                device=self.device,
+            )
+
+            r_std_cpu = self.residual_std.detach().cpu()
+            r_mean_cpu = self.residual_mean.detach().cpu()
+
+            K = max(self.config.fm.eval_n_samples, 1)
+            best_l1 = float("inf")
+            best_m = None
+            for _ in range(K):
+                residual_norm = fm_slide_inference(
+                    self.generator,
+                    self.ref_clip,
+                    window_size=self.config.fm.window_size,
+                    nfe=self.config.fm.nfe_inference,
+                    context_past=self.config.data.context_past,
+                    context_future=self.config.data.context_future,
+                    prev_frames=self.config.data.prev_frames,
+                    expr_dim=self.config.data.flame_expr_dim,
+                    device=self.device,
+                )
+                # Residual FM output is in residual-normalized space; denormalize
+                # to expression-normalized space, then sum with stage 2.
+                residual_z = residual_norm * r_std_cpu + r_mean_cpu
+                pred_norm = stage2_pred_norm + residual_z
+                m = compute_ref_metrics(pred_norm, self.ref_clip)
+                if m["ref_raw_l1"] < best_l1:
+                    best_l1 = m["ref_raw_l1"]
+                    best_m = m
+
+            if is_main_process():
+                log_metrics(
+                    {
+                        "residual_fm/val_ref_raw_l1_bestK": best_m["ref_raw_l1"],
+                        "residual_fm/val_ref_raw_l1_lag_bestK": best_m["ref_raw_l1_lag"],
+                        "residual_fm/val_ref_std_ratio_full_bestK": best_m["ref_std_ratio_full"],
+                        "residual_fm/val_ref_std_ratio_mouth_bestK": best_m["ref_std_ratio_mouth"],
+                        "residual_fm/val_ref_std_ratio_problem_bestK": best_m["ref_std_ratio_problem"],
+                        "residual_fm/eval_n_samples": K,
+                    },
+                    step=self.global_step,
+                    run=self.wandb_run,
+                )
+                print(
+                    f"  Val Ref Raw L1 best-of-{K} "
+                    f"({Path(self.config.stage2.ref_clip_audio_path).stem}): "
+                    f"{best_m['ref_raw_l1']:.4f} "
+                    f"(lag-tol {best_m['ref_raw_l1_lag']:.4f}) | "
+                    f"std ratio full={best_m['ref_std_ratio_full']:.3f} "
+                    f"mouth={best_m['ref_std_ratio_mouth']:.3f} "
+                    f"problem={best_m['ref_std_ratio_problem']:.3f}"
+                )
+            return best_m["ref_raw_l1"]
 
         return avg_loss
 
