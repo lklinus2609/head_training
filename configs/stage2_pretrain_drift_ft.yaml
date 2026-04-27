@@ -1,0 +1,30 @@
+_base_: stage2_pretrain_noise.yaml
+
+# Track B: short finetune of Track A best with scheduled sampling on
+# prev_frames. Reactivates the existing p_drift mechanism in
+# _short_horizon_forward (already implemented but disabled in canonical
+# because a prior FM ablation suggested AR drift was not dominant — that
+# assumption was contradicted by a sliding-vs-teacher test on the AR
+# transformer track, where sliding L1 = 2.10 vs teacher L1 = 0.27).
+#
+# Sequential path is ~14x slower per step, so this is a short finetune
+# (80 epochs) rather than a from-scratch retrain. Expected total cost:
+# ~1.4x of Track A's full train. Run only if Track A's sliding-vs-teacher
+# gap remains > ~2x.
+#
+# pretrained_gen_path must point to Track A's stage2_best.pt. Either
+# replace below or pass via --pretrained_gen on the command line.
+stage2:
+  epochs: 80
+  lr: 5.0e-5                       # lower LR for finetune
+  use_cosine_lr: false             # advance-loop in train_stage2.py assumes resume semantics
+  patience: 0                      # don't early-stop a short finetune
+  pretrained_gen_path: ""          # set to $WORK/checkpoints/d4head/<track_a_run>/stage2_best.pt
+  # Scheduled sampling schedule
+  p_drift_start: 0.0
+  p_drift_end: 0.3
+  p_drift_warmup_epochs: 20
+  # Continuous regularizer alongside discrete drift
+  prev_frames_noise_std: 0.05
+  # Keep dormant — would stack 14x cost on top of 14x sequential path
+  lambda_var_full: 0.0

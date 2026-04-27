@@ -12,10 +12,14 @@ from evaluation.ref_clip import (
     prepare_ref_clip,
 )
 from training.losses import (
+    acceleration_loss,
+    covariance_loss,
     discriminator_loss,
     generator_adversarial_loss,
     gradient_penalty,
     l1_reconstruction_loss,
+    spectral_loss,
+    velocity_loss,
 )
 from training.schedulers import get_lambda_adv
 from utils.checkpoint import checkpoint_path, save_checkpoint
@@ -209,7 +213,10 @@ class Stage3Trainer:
         self.generator.train()
         self.discriminator.train()
 
-        totals = {"d_loss": 0, "g_loss": 0, "recon": 0, "adv": 0, "gp": 0}
+        totals = {
+            "d_loss": 0, "g_loss": 0, "recon": 0, "adv": 0, "gp": 0,
+            "vel": 0, "accel": 0, "spec": 0, "cov": 0,
+        }
         num_batches = 0
         K = self.config.data.disc_window
 
@@ -255,6 +262,31 @@ class Stage3Trainer:
             # === Generator step ===
             recon_loss = l1_reconstruction_loss(pred_sh, target_sh, self.dim_weights)
 
+            # Auxiliary motion-range losses carried forward from Stage 2.
+            # Zero λ = original stage3 behaviour (pure L1 anchor). Positive λ
+            # keeps damping counter-pressure alive while adversarial pushes
+            # off the L1 median.
+            lambda_vel = self.config.stage3.lambda_vel
+            if lambda_vel > 0.0:
+                vel_loss = velocity_loss(pred_sh, target_sh, self.dim_weights)
+            else:
+                vel_loss = torch.zeros((), device=pred_sh.device)
+            lambda_accel = self.config.stage3.lambda_accel
+            if lambda_accel > 0.0:
+                accel_loss = acceleration_loss(pred_sh, target_sh, self.dim_weights)
+            else:
+                accel_loss = torch.zeros((), device=pred_sh.device)
+            lambda_spec = self.config.stage3.lambda_spec
+            if lambda_spec > 0.0:
+                spec_loss = spectral_loss(pred_sh, target_sh, self.dim_weights)
+            else:
+                spec_loss = torch.zeros((), device=pred_sh.device)
+            lambda_cov = self.config.stage3.lambda_cov
+            if lambda_cov > 0.0:
+                cov_loss = covariance_loss(pred_sh, target_sh)
+            else:
+                cov_loss = torch.zeros((), device=pred_sh.device)
+
             fake_windows_g = self._compute_disc_windows_from_generated(pred_sh_reshaped, batch, K)
             with torch.cuda.amp.autocast():
                 fake_score = self.discriminator(fake_windows_g)
@@ -267,7 +299,14 @@ class Stage3Trainer:
                 self.config.stage3.lambda_adv_start,
                 self.config.stage3.lambda_adv_end,
             )
-            g_loss = recon_loss + lambda_adv * adv_loss
+            g_loss = (
+                recon_loss
+                + lambda_vel * vel_loss
+                + lambda_accel * accel_loss
+                + lambda_spec * spec_loss
+                + lambda_cov * cov_loss
+                + lambda_adv * adv_loss
+            )
 
             self.gen_optimizer.zero_grad()
             self.gen_scaler.scale(g_loss).backward()
@@ -284,6 +323,10 @@ class Stage3Trainer:
             totals["recon"] += recon_loss.item()
             totals["adv"] += adv_loss.item()
             totals["gp"] += gp.item()
+            totals["vel"] += vel_loss.item()
+            totals["accel"] += accel_loss.item()
+            totals["spec"] += spec_loss.item()
+            totals["cov"] += cov_loss.item()
             num_batches += 1
             self.global_step += 1
 
@@ -305,7 +348,15 @@ class Stage3Trainer:
                             "stage3/recon_loss": recon_loss.item(),
                             "stage3/adv_loss": adv_loss.item(),
                             "stage3/gp": gp.item(),
+                            "stage3/vel_loss": vel_loss.item(),
+                            "stage3/accel_loss": accel_loss.item(),
+                            "stage3/spec_loss": spec_loss.item(),
+                            "stage3/cov_loss": cov_loss.item(),
                             "stage3/lambda_adv": lambda_adv,
+                            "stage3/lambda_vel": lambda_vel,
+                            "stage3/lambda_accel": lambda_accel,
+                            "stage3/lambda_spec": lambda_spec,
+                            "stage3/lambda_cov": lambda_cov,
                             "stage3/d_real_acc": d_real_acc,
                             "stage3/d_fake_acc": d_fake_acc,
                             "stage3/p_drift_eff": p_drift,
@@ -393,6 +444,14 @@ class Stage3Trainer:
                     f"mouth={m['ref_std_ratio_mouth']:.3f} "
                     f"problem={m['ref_std_ratio_problem']:.3f}"
                 )
+            metric = self.config.stage3.selection_metric
+            if metric == "ref_raw_l1_lag":
+                return m["ref_raw_l1_lag"]
+            if metric == "composite":
+                # L1_lag stays the anchor; std-ratio penalty rewards motion
+                # range climbing back toward 1.0. 0.5 weight balances the
+                # typical L1 scale (~0.3) against ratio distances (~0.1–0.2).
+                return m["ref_raw_l1_lag"] + 0.5 * abs(m["ref_std_ratio_problem"] - 1.0)
             return m["ref_raw_l1"]
 
         return avg_recon

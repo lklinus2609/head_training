@@ -1,0 +1,18 @@
+# Model checkpoints — transfer with rsync/scp, not git.
+*.pt
+*.pth
+checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Node tooling — this is a Python project; JS is local tooling only.
+node_modules/
+package.json
+package-lock.json
+
+# Local user state and personal data (not part of the project).
+.claude/
+videos/

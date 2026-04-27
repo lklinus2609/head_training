@@ -5,6 +5,7 @@ Launch with:
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -31,6 +32,10 @@ def parse_args():
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
     parser.add_argument("--resume", type=str, default=None,
                         help="Checkpoint path to resume from, or 'auto' to find latest")
+    parser.add_argument("--pretrained_gen", type=str, default=None,
+                        help="Path to Stage 2 checkpoint to load generator weights from. "
+                             "Unlike --resume, only weights are loaded (fresh optimizer, "
+                             "epoch=0). Use for finetune-from-best.")
     return parser.parse_args()
 
 
@@ -122,6 +127,14 @@ def main():
         audio_conv_channels=config.generator.audio_conv_channels,
         audio_conv_kernel_sizes=config.generator.audio_conv_kernel_sizes,
     ).to(device)
+
+    pretrained_path = args.pretrained_gen or config.stage2.pretrained_gen_path
+    if pretrained_path:
+        pretrained_path = os.path.expandvars(pretrained_path)
+        if is_main_process():
+            print(f"Loading pretrained generator from {pretrained_path}")
+        ckpt = torch.load(pretrained_path, map_location=device, weights_only=False)
+        generator.load_state_dict(ckpt["generator_model"])
 
     if config.stage2.use_compile:
         if is_main_process():

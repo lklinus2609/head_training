@@ -1,0 +1,16 @@
+_base_: stage2_pretrain.yaml
+
+# Track A: Gaussian noise injection on GT prev_frames during training to
+# reduce auto-regressive sliding-inference drift. Confirmed empirically:
+# Stage 2 sliding L1 = 2.10 vs teacher L1 = 0.27 (8x gap) on a held-out
+# clip — the model is fine on its own but cannot tolerate its own
+# predictions as prev_frames context. Element-wise noise keeps the batched
+# path intact (~1.0x cost) and trains robustness to small deviations from
+# clean GT context, which is what predicted prev_frames are at inference.
+#
+# Magnitude rationale: expression is per-dim normalized (unit std). 0.05
+# is ~5% of typical motion magnitude — modest enough to stay near-manifold,
+# large enough to bridge the train/inference gap. If under-helps, bracket
+# toward 0.1; if val L1 jumps >2x vs canonical, drop to 0.025.
+stage2:
+  prev_frames_noise_std: 0.05

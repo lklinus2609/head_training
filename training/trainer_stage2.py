@@ -106,6 +106,8 @@ class Stage2Trainer:
                 target_list.append(expression[:, t:t + H])
 
             prev_windows = torch.stack(prev_list, dim=1).reshape(B * N, P, D)
+            if self.generator.training and self.config.stage2.prev_frames_noise_std > 0:
+                prev_windows = prev_windows + torch.randn_like(prev_windows) * self.config.stage2.prev_frames_noise_std
             audio_windows = torch.stack(audio_list, dim=1).reshape(B * N, audio_len, -1)
             emotion_expanded = emotion.unsqueeze(1).expand(-1, N).reshape(B * N)
             targets = torch.stack(target_list, dim=1).reshape(B * N, H, D)
@@ -134,6 +136,11 @@ class Stage2Trainer:
                 prev_win = torch.where(
                     drift_mask[:, None, None], running_prev.detach(), gt_prev
                 )
+            if self.generator.training and self.config.stage2.prev_frames_noise_std > 0:
+                noise = torch.randn_like(prev_win) * self.config.stage2.prev_frames_noise_std
+                if j > 0:
+                    noise = torch.where(drift_mask[:, None, None], torch.zeros_like(noise), noise)
+                prev_win = prev_win + noise
             audio_win = audio[:, t:t + audio_len]
             pred = self.generator(
                 audio_win, emotion, prev_win,

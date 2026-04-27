@@ -1,0 +1,60 @@
+_base_: base.yaml
+
+# Parallel experimental track for Stage 3. Addresses the gap left by the
+# canonical recipe:
+#
+#   1. disc_window=5 (167 ms) is sub-syllabic — the discriminator can't tell
+#      damped-real from real. Widen to 30 frames (1 s). Disc depth bumped to
+#      absorb the larger temporal context. (Same change as bigwin.yaml.)
+#
+#   2. Canonical stage 3 drops every motion-range regularizer that Stage 2
+#      relied on (vel, accel, spec, cov). With λ_adv capped at 0.1 — roughly
+#      3 % of the generator loss — nothing in the recipe pushes back against
+#      L1's damping pull. Carry the Stage 2 auxiliaries forward so motion
+#      range stays alive while adversarial warms up.
+#
+#   3. λ_adv_end bumped 0.1 → 0.25 so adversarial actually moves the median
+#      once the auxiliaries are holding the floor.
+#
+#   4. Selection metric switched to `composite` — L1_lag + 0.5·|std_problem−1|.
+#      `ref_raw_l1` alone biases the saved best back toward the damped
+#      minimum, which is exactly what Stage 3 is supposed to escape.
+#
+# Paired pretraining: run this on top of a stage 2 checkpoint trained with
+# the canonical stage2_pretrain.yaml (λ_spec + λ_cov are now defaults).
+# The auxiliaries here match those values for continuity across the stage
+# boundary.
+data:
+  disc_window: 30
+
+discriminator:
+  n_layers: 4
+
+stage3:
+  epochs: 100
+  batch_size: 256
+  gen_lr: 5.0e-5
+  gen_beta1: 0.5
+  gen_beta2: 0.999
+  disc_lr: 1.0e-4
+  disc_beta1: 0.5
+  disc_beta2: 0.999
+  weight_decay: 1.0e-5
+  grad_clip: 1.0
+  lambda_adv_start: 0.02
+  lambda_adv_end: 0.25
+  lambda_warmup_steps: 10000
+  disc_steps_per_gen: 1
+  gen_horizon: 4
+  # Carry Stage 2 auxiliaries through adversarial co-training.
+  lambda_vel: 0.5
+  lambda_accel: 0.25
+  lambda_spec: 0.25
+  lambda_cov: 0.1
+  pretrained_gen_path: "$WORK/checkpoints/d4head/stage2_best.pt"
+  # Pull best-checkpoint selection off pure L1 so escape from the median
+  # doesn't get punished by the saving logic.
+  selection_metric: "composite"
+  val_every: 1
+  save_every: 5
+  seed: 42

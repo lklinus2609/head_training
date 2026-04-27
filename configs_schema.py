@@ -107,6 +107,14 @@ class Stage2Config:
     # fully batched, no sequential cost, no inference-path change.
     lambda_spec: float = 0.0
     lambda_cov: float = 0.0
+    # Gaussian noise injected onto GT prev_frames during training only.
+    # Trains robustness to imperfect prev_frames context without sequential
+    # cost. Default 0 = off (canonical recipe).
+    prev_frames_noise_std: float = 0.0
+    # Init generator weights from a pretrained Stage 2 checkpoint at the
+    # start of training (finetune-from-best). Distinct from --resume which
+    # restores epoch + optimizer state. Default "" = train from scratch.
+    pretrained_gen_path: str = ""
     # Quality-neutral GPU-efficiency toggles.
     # use_bf16: wrap generator forward + loss computation in bfloat16 autocast.
     #   A100 native bf16 tensor cores; same range as fp32 so no GradScaler
@@ -143,6 +151,19 @@ class Stage3Config:
     p_drift_start: float = 0.0
     p_drift_end: float = 0.0
     p_drift_warmup_epochs: int = 0
+    # Auxiliary motion-range losses carried forward from Stage 2. Default 0.0
+    # preserves the original stage3 recipe (pure L1 + adversarial). Setting
+    # these > 0 keeps Stage 2's damping counter-pressure alive while the
+    # adversarial term pushes off the L1 median.
+    lambda_vel: float = 0.0
+    lambda_accel: float = 0.0
+    lambda_spec: float = 0.0
+    lambda_cov: float = 0.0
+    # Best-checkpoint selection metric.
+    #   ref_raw_l1       : raw-space L1 (original behavior, biases to median)
+    #   ref_raw_l1_lag   : lag-tolerant L1, absorbs ±2 frame timing offsets
+    #   composite        : ref_raw_l1_lag + 0.5 * |ref_std_ratio_problem - 1|
+    selection_metric: str = "ref_raw_l1"
 
 
 @dataclass
@@ -240,25 +261,29 @@ def _validate(config: TrainConfig):
         raise ValueError("generator.n_layers must be >= 1")
     if config.discriminator.n_layers < 1:
         raise ValueError("discriminator.n_layers must be >= 1")
+    if config.stage3.selection_metric not in ("ref_raw_l1", "ref_raw_l1_lag", "composite"):
+        raise ValueError(
+            f"stage3.selection_metric must be 'ref_raw_l1', 'ref_raw_l1_lag', "
+            f"or 'composite'; got '{config.stage3.selection_metric}'"
+        )
 
 
 def load_config(yaml_path: str) -> TrainConfig:
     """Load a YAML config file into a validated TrainConfig.
 
     Supports a _base_ field for inheriting from a base config file.
+    Inheritance is recursive: a base config may itself declare a _base_.
     """
     yaml_path = Path(yaml_path)
 
     with open(yaml_path) as f:
         raw = yaml.safe_load(f) or {}
 
-    # Handle base config inheritance
-    config = TrainConfig()
     if "_base_" in raw:
         base_path = yaml_path.parent / raw.pop("_base_")
-        with open(base_path) as f:
-            base_raw = yaml.safe_load(f) or {}
-        _merge_dict_into_dataclass(config, base_raw)
+        config = load_config(str(base_path))
+    else:
+        config = TrainConfig()
 
     _merge_dict_into_dataclass(config, raw)
     _validate(config)
