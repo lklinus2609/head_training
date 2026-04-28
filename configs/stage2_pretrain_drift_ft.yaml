@@ -15,7 +15,10 @@ _base_: stage2_pretrain_noise.yaml
 # pretrained_gen_path must point to Track A's stage2_best.pt. Either
 # replace below or pass via --pretrained_gen on the command line.
 stage2:
-  epochs: 80
+  epochs: 120                      # 80 was sized for scheduled-sampling alone;
+                                   # bumped to 120 because Track B now also
+                                   # learns emo=1 representations from the
+                                   # additional split being folded into train.
   lr: 5.0e-5                       # lower LR for finetune
   use_cosine_lr: false             # advance-loop in train_stage2.py assumes resume semantics
   patience: 0                      # don't early-stop a short finetune

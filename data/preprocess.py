@@ -295,9 +295,17 @@ def main():
             print("Failed to process utterance.")
         return
 
-    # Split using official CSV if available, otherwise fall back to speaker-based split
+    # Split using official CSV if available, otherwise fall back to speaker-based split.
+    # `additional` clips are folded into train: in the BEAT2 English subset they are
+    # the only emotion=1 (happy) data, and dropping them left the model with zero
+    # emo=1 training examples — making emo=1 conditioning at inference an
+    # extrapolation from a randomly-initialized embedding. NOTE: this means held-out
+    # emo=1 evaluation is no longer possible without an explicit per-clip exclusion
+    # mechanism; if a held-out emo=1 set is needed, exclude specific utterance_ids
+    # from `train_set_labels` below.
     if split_map:
-        train_manifest = [e for e in manifest if split_map.get(e["utterance_id"]) == "train"]
+        train_set_labels = {"train", "additional"}
+        train_manifest = [e for e in manifest if split_map.get(e["utterance_id"]) in train_set_labels]
         val_manifest = [e for e in manifest if split_map.get(e["utterance_id"]) == "val"]
         test_manifest = [e for e in manifest if split_map.get(e["utterance_id"]) == "test"]
         # Include unmatched entries in training
