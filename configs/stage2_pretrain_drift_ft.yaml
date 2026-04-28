@@ -28,10 +28,30 @@ stage2:
   prev_frames_noise_std: 0.05
   # Keep dormant — would stack 14x cost on top of 14x sequential path
   lambda_var_full: 0.0
-  # Multi-clip selection set drawn from BEAT2 test split (265 clips,
-  # 2.5x the val split, val reserved for final unbiased evaluation).
-  # Generate with: python scripts/pick_eval_clips.py --split test --n 16
-  # Paste the resulting `ref_clip_audio_paths:` block here, replacing the
-  # placeholder list below. Selection metric becomes mean lag-tolerant L1
-  # across these clips; per-clip metrics are still logged separately.
-  ref_clip_audio_paths: []
+  # Multi-clip selection set: 8 neutral (test split, emo=0) + 8 happy
+  # (additional split, emo=1). The English BEAT2 v2.0.0 subset only has
+  # these two emotions on disk (1472 emo=0, 156 emo=1) so this exhausts
+  # available emotion diversity. 5 speakers (lawrence, nidal, scott,
+  # solomon, sophie) appear in both emotion groups for cross-emotion
+  # comparison; 6 are emotion-unique (kieks, stewart, wayne neutral;
+  # ayana, carla, miranda happy). Selection metric is mean
+  # ref_raw_l1_lag across all 16; per-clip metrics still logged.
+  # 2_scott_1_8_8.wav is intentionally NOT in the set so it remains
+  # a clean held-out test number.
+  ref_clip_audio_paths:
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/10_kieks_0_6_6.wav"
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/4_lawrence_0_111_111.wav"
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/11_nidal_0_1_1.wav"
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/2_scott_0_65_65.wav"
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/3_solomon_0_103_103.wav"
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/7_sophie_0_3_3.wav"
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/5_stewart_0_7_7.wav"
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/1_wayne_0_5_5.wav"
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/21_ayana_1_12_12.wav"
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/6_carla_1_10_10.wav"
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/4_lawrence_1_11_11.wav"
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/9_miranda_1_10_10.wav"
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/11_nidal_1_6_6.wav"
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/2_scott_1_9_9.wav"
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/3_solomon_1_4_4.wav"
+    - "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/7_sophie_1_5_5.wav"
