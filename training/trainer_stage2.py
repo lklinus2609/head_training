@@ -7,9 +7,10 @@ import torch
 from tqdm import tqdm
 
 from evaluation.ref_clip import (
+    aggregate_ref_metrics,
     ar_slide_inference,
     compute_ref_metrics,
-    prepare_ref_clip,
+    prepare_ref_clips,
 )
 from training.losses import (
     acceleration_loss,
@@ -54,13 +55,21 @@ class Stage2Trainer:
         if self.use_bf16 and is_main_process():
             print("Using bfloat16 autocast for forward + loss (no GradScaler needed)")
 
-        # Reference-clip raw-L1 evaluation for best-checkpoint selection.
-        # Loaded once on rank 0 here; _run_ref_inference reuses the tensors each val.
-        self.ref_clip = None
-        if is_main_process() and config.stage2.ref_clip_audio_path:
-            self.ref_clip = prepare_ref_clip(
+        # Reference-clip evaluation for best-checkpoint selection.
+        # Multi-clip mode (config.stage2.ref_clip_audio_paths non-empty)
+        # averages metrics across clips and uses lag-tolerant L1 for
+        # selection. Legacy single-clip mode (only ref_clip_audio_path set)
+        # keeps using raw L1 for selection so old runs stay comparable.
+        # Loaded once on rank 0 here; _run_ref_inference reuses the tensors.
+        self.ref_clips: list[dict] | None = None
+        self.multi_clip_selection: bool = False
+        if is_main_process() and (
+            config.stage2.ref_clip_audio_paths or config.stage2.ref_clip_audio_path
+        ):
+            self.ref_clips = prepare_ref_clips(
                 config, self.train_loader.dataset.stats, device
             )
+            self.multi_clip_selection = bool(config.stage2.ref_clip_audio_paths)
 
     def _short_horizon_forward(self, expression, audio, emotion, prev_expr, p_drift: float = 0.0):
         """Batched short-horizon prediction: predict H frames at a time using GT context.
@@ -163,23 +172,31 @@ class Stage2Trainer:
         return start + (end - start) * (epoch / w)
 
     @torch.no_grad()
-    def _run_ref_inference(self) -> dict:
-        """Sliding-mode AR inference on the reference clip plus metric computation.
+    def _run_ref_inference(self) -> tuple[dict, list[tuple[str, dict]]]:
+        """Sliding-mode AR inference across all configured ref clips.
 
-        Returns the metrics dict from `compute_ref_metrics`. The best-checkpoint
-        selection metric (`ref_raw_l1`) is unchanged from the prior inline impl.
+        Returns:
+            (aggregated_metrics, per_clip): aggregated_metrics is the
+            mean of each scalar metric across clips. per_clip is a list of
+            (label, metrics) for diagnostic logging.
         """
-        pred_norm = ar_slide_inference(
-            self.generator,
-            self.ref_clip,
-            horizon=self.config.stage2.gen_horizon,
-            context_past=self.config.data.context_past,
-            context_future=self.config.data.context_future,
-            prev_frames=self.config.data.prev_frames,
-            expr_dim=self.config.data.flame_expr_dim,
-            device=self.device,
-        )
-        return compute_ref_metrics(pred_norm, self.ref_clip)
+        per_clip: list[tuple[str, dict]] = []
+        for clip in self.ref_clips:
+            pred_norm = ar_slide_inference(
+                self.generator,
+                clip,
+                horizon=self.config.stage2.gen_horizon,
+                context_past=self.config.data.context_past,
+                context_future=self.config.data.context_future,
+                prev_frames=self.config.data.prev_frames,
+                expr_dim=self.config.data.flame_expr_dim,
+                device=self.device,
+            )
+            metrics = compute_ref_metrics(pred_norm, clip)
+            per_clip.append((clip["label"], metrics))
+
+        aggregated = aggregate_ref_metrics([m for _, m in per_clip])
+        return aggregated, per_clip
 
     def _effective_lambda_var(self, epoch: int) -> float:
         lv = self.config.stage2.lambda_var
@@ -395,10 +412,11 @@ class Stage2Trainer:
             )
             print(f"  Val L1: {avg_loss:.4f}, Val Var: {avg_var:.4f}, Val MSE: {avg_mse:.4f}")
 
-        # Raw-L1 on reference clip — selection metric when configured.
-        if self.ref_clip is not None:
-            m = self._run_ref_inference()
+        # Reference-clip eval — selection metric when configured.
+        if self.ref_clips is not None:
+            m, per_clip = self._run_ref_inference()
             if is_main_process():
+                # Aggregated metrics (averaged across clips, or single-clip values).
                 log_metrics(
                     {
                         "stage2/val_ref_raw_l1": m["ref_raw_l1"],
@@ -410,16 +428,39 @@ class Stage2Trainer:
                     step=self.global_step,
                     run=self.wandb_run,
                 )
-                print(
-                    f"  Val Ref Raw L1 "
-                    f"({Path(self.config.stage2.ref_clip_audio_path).stem}): "
-                    f"{m['ref_raw_l1']:.4f} "
-                    f"(lag-tol {m['ref_raw_l1_lag']:.4f}) | "
-                    f"std ratio full={m['ref_std_ratio_full']:.3f} "
-                    f"mouth={m['ref_std_ratio_mouth']:.3f} "
-                    f"problem={m['ref_std_ratio_problem']:.3f}"
-                )
-            return m["ref_raw_l1"]
+                # Per-clip diagnostic metrics so we can see which clips
+                # the model handles well vs. poorly.
+                if len(per_clip) > 1:
+                    per_clip_log = {}
+                    for label, pm in per_clip:
+                        per_clip_log[f"stage2/ref/{label}/raw_l1"] = pm["ref_raw_l1"]
+                        per_clip_log[f"stage2/ref/{label}/raw_l1_lag"] = pm["ref_raw_l1_lag"]
+                        per_clip_log[f"stage2/ref/{label}/std_ratio_full"] = pm["ref_std_ratio_full"]
+                    log_metrics(per_clip_log, step=self.global_step, run=self.wandb_run)
+
+                if len(per_clip) == 1:
+                    label = per_clip[0][0]
+                    print(
+                        f"  Val Ref ({label}): "
+                        f"L1={m['ref_raw_l1']:.4f} "
+                        f"(lag-tol {m['ref_raw_l1_lag']:.4f}) | "
+                        f"std ratio full={m['ref_std_ratio_full']:.3f} "
+                        f"mouth={m['ref_std_ratio_mouth']:.3f} "
+                        f"problem={m['ref_std_ratio_problem']:.3f}"
+                    )
+                else:
+                    print(
+                        f"  Val Ref (avg over {len(per_clip)} clips): "
+                        f"L1={m['ref_raw_l1']:.4f} "
+                        f"(lag-tol {m['ref_raw_l1_lag']:.4f}) | "
+                        f"std ratio full={m['ref_std_ratio_full']:.3f} "
+                        f"mouth={m['ref_std_ratio_mouth']:.3f} "
+                        f"problem={m['ref_std_ratio_problem']:.3f}"
+                    )
+            # Multi-clip mode → lag-tolerant selection (more robust to
+            # per-clip timing offsets). Legacy single-clip mode → raw L1
+            # so existing run histories stay directly comparable.
+            return m["ref_raw_l1_lag"] if self.multi_clip_selection else m["ref_raw_l1"]
 
         return avg_loss
 

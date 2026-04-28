@@ -28,3 +28,10 @@ stage2:
   prev_frames_noise_std: 0.05
   # Keep dormant — would stack 14x cost on top of 14x sequential path
   lambda_var_full: 0.0
+  # Multi-clip selection set drawn from BEAT2 test split (265 clips,
+  # 2.5x the val split, val reserved for final unbiased evaluation).
+  # Generate with: python scripts/pick_eval_clips.py --split test --n 16
+  # Paste the resulting `ref_clip_audio_paths:` block here, replacing the
+  # placeholder list below. Selection metric becomes mean lag-tolerant L1
+  # across these clips; per-clip metrics are still logged separately.
+  ref_clip_audio_paths: []

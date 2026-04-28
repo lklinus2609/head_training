@@ -80,6 +80,13 @@ class Stage2Config:
     lambda_var_warmup_epochs: int = 0
     lambda_var_decay_epochs: int = 0
     ref_clip_audio_path: str = ""
+    # Multi-clip selection: when non-empty, sliding-mode inference runs on
+    # every path and the selection metric is the mean lag-tolerant raw-L1
+    # across clips. Per-clip metrics are still logged separately. Takes
+    # precedence over ref_clip_audio_path (singular) when set. Use a
+    # diversity-balanced set spanning {speakers, emotions} drawn from a
+    # held-out split (see scripts/pick_eval_clips.py for a balanced picker).
+    ref_clip_audio_paths: list[str] = field(default_factory=list)
     use_cosine_lr: bool = False
     cosine_lr_min_ratio: float = 0.1
     # Self-drift schedule (Track A2): probability of feeding the generator's

@@ -11,6 +11,7 @@ Split into three steps so different trainers can plug in their own inference:
   3. `compute_ref_metrics` — raw-L1 + lag-tolerant L1 + per-dim std ratios.
 """
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -26,38 +27,36 @@ MOUTH_DIMS = list(range(11))
 PROBLEM_DIMS = [22, 76, 95]
 
 
-def prepare_ref_clip(config, train_stats: dict, device: torch.device) -> dict | None:
-    """Load reference audio + matching BEAT2 GT for per-epoch ref evaluation.
+def _prepare_one_clip(
+    audio_path_str: str, config, train_stats: dict, device: torch.device
+) -> dict | None:
+    """Load one reference clip's audio + matching BEAT2 GT.
 
-    Returns None (with a printed warning) if the audio file, matching npz,
-    expression stats, or required config are missing. Only call this on
-    rank 0 — the returned dict contains tensors on `device`.
-
-    Args:
-        config: The TrainConfig. Reads `data.audio_feature`, `data.fps`,
-            `data.mel_*`, `data.context_past/future`, `data.flame_expr_dim`,
-            `paths.beat2_raw_dir`, and the track-specific
-            `stage2.ref_clip_audio_path` (stage 3 / FM reuse the same field).
-        train_stats: The training dataset's `stats` dict (must contain
-            `expr_mean` and `expr_std`).
-        device: Device for the audio/emotion tensors.
+    Shared inner helper for `prepare_ref_clip` (singular) and
+    `prepare_ref_clips` (plural). Returns None on any load failure with a
+    printed warning.
 
     Returns:
-        Dict with keys `audio, emotion, gt_raw, expr_mean, expr_std, T`,
-        or None on any load failure.
+        Dict with keys `audio, emotion, gt_raw, expr_mean, expr_std, T,
+        label`, or None.
     """
-    audio_path_str = config.stage2.ref_clip_audio_path
     if not audio_path_str:
         return None
 
+    # `_merge_dict_into_dataclass` only resolves env vars on scalar string
+    # fields, not on list-of-strings (e.g. `ref_clip_audio_paths`). Expand
+    # here so $WORK/... entries in the multi-clip list work the same as the
+    # singular path. Idempotent on already-expanded values.
+    audio_path_str = os.path.expandvars(audio_path_str)
+
     audio_path = Path(audio_path_str)
     if not audio_path.exists():
-        print(f"  [ref_clip] audio not found: {audio_path} — skipping ref eval")
+        print(f"  [ref_clip] audio not found: {audio_path} — skipping")
         return None
 
     if config.data.audio_feature != "mel":
         print(f"  [ref_clip] only mel audio_feature supported; got "
-              f"{config.data.audio_feature} — skipping ref eval")
+              f"{config.data.audio_feature} — skipping")
         return None
 
     waveform, sr = sf.read(str(audio_path))
@@ -88,11 +87,11 @@ def prepare_ref_clip(config, train_stats: dict, device: torch.device) -> dict | 
     npz_candidates = list(beat2_dir.rglob(f"{audio_path.stem}.npz"))
     if not npz_candidates:
         print(f"  [ref_clip] no matching npz for {audio_path.stem} under "
-              f"{beat2_dir} — skipping ref eval")
+              f"{beat2_dir} — skipping")
         return None
     npz_data = np.load(str(npz_candidates[0]), allow_pickle=True)
     if "expressions" not in npz_data:
-        print(f"  [ref_clip] npz has no 'expressions' field — skipping ref eval")
+        print(f"  [ref_clip] {audio_path.stem}.npz has no 'expressions' field — skipping")
         return None
     gt_raw = npz_data["expressions"][:, :config.data.flame_expr_dim].astype(np.float32)
 
@@ -114,7 +113,74 @@ def prepare_ref_clip(config, train_stats: dict, device: torch.device) -> dict | 
         "expr_mean": expr_mean,
         "expr_std": expr_std,
         "T": T,
+        "label": audio_path.stem,
     }
+
+
+def prepare_ref_clip(config, train_stats: dict, device: torch.device) -> dict | None:
+    """Single-clip ref-eval preparation (legacy single-path API).
+
+    Reads `config.stage2.ref_clip_audio_path`. Use `prepare_ref_clips` for
+    the multi-clip path. Returns None on any load failure.
+    """
+    return _prepare_one_clip(
+        config.stage2.ref_clip_audio_path, config, train_stats, device
+    )
+
+
+def prepare_ref_clips(config, train_stats: dict, device: torch.device) -> list[dict] | None:
+    """Multi-clip ref-eval preparation.
+
+    If `config.stage2.ref_clip_audio_paths` (plural) is non-empty, loads
+    each path and returns the list (skipping any that fail to load).
+    Otherwise falls back to `config.stage2.ref_clip_audio_path` (singular),
+    returning a one-element list. Returns None if nothing loads — callers
+    should treat None as "ref-eval disabled".
+
+    Only call on rank 0.
+    """
+    paths = list(config.stage2.ref_clip_audio_paths)
+    if paths:
+        clips = []
+        for p in paths:
+            clip = _prepare_one_clip(p, config, train_stats, device)
+            if clip is not None:
+                clips.append(clip)
+        if not clips:
+            print("  [ref_clip] no clips loaded from ref_clip_audio_paths — disabling ref eval")
+            return None
+        print(f"  [ref_clip] {len(clips)} clip(s) loaded for multi-clip selection")
+        return clips
+
+    legacy = _prepare_one_clip(
+        config.stage2.ref_clip_audio_path, config, train_stats, device
+    )
+    return [legacy] if legacy is not None else None
+
+
+def aggregate_ref_metrics(per_clip_metrics: list[dict]) -> dict:
+    """Average scalar metrics across clips.
+
+    `per_dim_std_ratio` is averaged element-wise. NaN per-clip values are
+    skipped per metric. Returns a dict with the same keys as
+    `compute_ref_metrics` (averaged). Returns {} when the input list is
+    empty.
+    """
+    if not per_clip_metrics:
+        return {}
+    scalar_keys = [
+        "ref_raw_l1", "ref_raw_l1_lag",
+        "ref_std_ratio_full", "ref_std_ratio_mouth", "ref_std_ratio_problem",
+    ]
+    out = {}
+    for k in scalar_keys:
+        vals = [m[k] for m in per_clip_metrics if k in m and not np.isnan(m[k])]
+        out[k] = float(np.mean(vals)) if vals else float("nan")
+
+    ratios = [m["per_dim_std_ratio"] for m in per_clip_metrics if "per_dim_std_ratio" in m]
+    if ratios:
+        out["per_dim_std_ratio"] = np.mean(np.stack(ratios, axis=0), axis=0)
+    return out
 
 
 @torch.no_grad()
