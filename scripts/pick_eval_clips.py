@@ -82,20 +82,37 @@ def main():
         buckets[key].sort()
         rng.shuffle(buckets[key])
 
-    # Round-robin: cycle through buckets sorted by size descending so densely
-    # populated cells contribute first when N exceeds bucket count.
-    sorted_keys = sorted(buckets.keys(), key=lambda k: (-len(buckets[k]), k))
-    indices = {k: 0 for k in sorted_keys}
+    # Build an emotion-interleaved cell order so the first N picks span as
+    # many emotions as available before any emotion contributes a second
+    # clip. Within an emotion, prefer speakers with more clips (better
+    # noise resilience). Without this interleaving, sorting by bucket size
+    # alone picks all emotion=0 cells first because BEAT2 has many more
+    # neutral takes than non-neutral, drowning out emotion diversity.
+    cells_by_emotion: dict[int, list[tuple[str, int]]] = defaultdict(list)
+    for cell in buckets.keys():
+        cells_by_emotion[cell[1]].append(cell)
+    for em in cells_by_emotion:
+        cells_by_emotion[em].sort(key=lambda k: (-len(buckets[k]), k[0]))
+
+    emotions_sorted = sorted(cells_by_emotion.keys())
+    max_layers = max(len(cells_by_emotion[em]) for em in emotions_sorted)
+    interleaved: list[tuple[str, int]] = []
+    for layer in range(max_layers):
+        for em in emotions_sorted:
+            if layer < len(cells_by_emotion[em]):
+                interleaved.append(cells_by_emotion[em][layer])
+
+    indices = {k: 0 for k in buckets}
     chosen: list[tuple[tuple[str, int], str]] = []
     while len(chosen) < args.n:
         progressed = False
-        for k in sorted_keys:
+        for cell in interleaved:
             if len(chosen) >= args.n:
                 break
-            i = indices[k]
-            if i < len(buckets[k]):
-                chosen.append((k, buckets[k][i]))
-                indices[k] = i + 1
+            i = indices[cell]
+            if i < len(buckets[cell]):
+                chosen.append((cell, buckets[cell][i]))
+                indices[cell] = i + 1
                 progressed = True
         if not progressed:
             break
