@@ -27,6 +27,31 @@ MOUTH_DIMS = list(range(11))
 PROBLEM_DIMS = [22, 76, 95]
 
 
+def make_prev_expr_init(
+    prev_frames: int,
+    expr_dim: int,
+    expr_mean: torch.Tensor | None,
+    expr_std: torch.Tensor | None,
+    device: torch.device,
+) -> torch.Tensor:
+    """Initial prev_frames context that matches training-time normalization.
+
+    At training, prev_expr at utterance start is zero-padded in raw space
+    then normalized (`data/dataset.py:108-120`), yielding
+    `(0 - expr_mean) / expr_std = -mean/std` per dim. Inference must mirror
+    this so the AR bootstrap state is in-distribution; otherwise the first
+    ~prev_frames windows are conditioned on the population mean (raw value
+    = expr_mean), which the model never saw at the start of utterances.
+
+    Falls back to zeros when stats are unavailable so callers without
+    loaded stats keep their legacy behavior.
+    """
+    if expr_mean is None or expr_std is None:
+        return torch.zeros(1, prev_frames, expr_dim, device=device)
+    init = (-expr_mean / expr_std).to(device).view(1, 1, -1)
+    return init.expand(1, prev_frames, expr_dim).contiguous()
+
+
 def _prepare_one_clip(
     audio_path_str: str, config, train_stats: dict, device: torch.device
 ) -> dict | None:
@@ -206,7 +231,10 @@ def ar_slide_inference(
 
     gen = generator.module if hasattr(generator, "module") else generator
 
-    prev_expr = torch.zeros(1, prev_frames, expr_dim, device=device)
+    prev_expr = make_prev_expr_init(
+        prev_frames, expr_dim,
+        clip.get("expr_mean"), clip.get("expr_std"), device,
+    )
     chunks = []
     for t in range(0, T, horizon):
         chunk_len = min(horizon, T - t)
@@ -250,7 +278,10 @@ def fm_slide_inference(
 
     gen = generator.module if hasattr(generator, "module") else generator
 
-    prev_expr = torch.zeros(1, prev_frames, expr_dim, device=device)
+    prev_expr = make_prev_expr_init(
+        prev_frames, expr_dim,
+        clip.get("expr_mean"), clip.get("expr_std"), device,
+    )
     chunks = []
     for t in range(0, T, window_size):
         chunk_len = min(window_size, T - t)

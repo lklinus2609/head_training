@@ -145,8 +145,13 @@ def generate_from_model(
     audio_padded = np.pad(audio_feats, ((C, F), (0, 0)), mode="edge")
     audio_tensor = torch.from_numpy(audio_padded).float().unsqueeze(0).to(device)
 
+    from evaluation.ref_clip import make_prev_expr_init
+
     all_expressions = []
-    prev_expr = torch.zeros(1, P, config.data.flame_expr_dim, device=device)
+    # Match training-time prev_expr init (raw zero, then normalize → -mean/std).
+    prev_expr = make_prev_expr_init(
+        P, config.data.flame_expr_dim, expr_mean, expr_std, device,
+    )
     emotion_tensor = torch.tensor([emotion], device=device)
 
     # Load GT for teacher forcing mode
@@ -202,8 +207,16 @@ def generate_from_model(
                 if start >= P:
                     prev_expr_gt = gt_norm[:, start - P:start]
                 else:
-                    pad = torch.zeros(1, P - start, config.data.flame_expr_dim, device=device)
-                    prev_expr_gt = torch.cat([pad, gt_norm[:, :start]], dim=1) if start > 0 else torch.zeros(1, P, config.data.flame_expr_dim, device=device)
+                    # Pad matches training-time normalization: zero-padded
+                    # raw frames become -mean/std after normalization.
+                    pad = make_prev_expr_init(
+                        P - start, config.data.flame_expr_dim,
+                        expr_mean, expr_std, device,
+                    )
+                    prev_expr_gt = (
+                        torch.cat([pad, gt_norm[:, :start]], dim=1)
+                        if start > 0 else pad
+                    )
                 pred = generator(audio_chunk, emotion_tensor, prev_expr_gt, target_expression=gt_chunk)
                 all_expressions.append(pred.cpu())
 

@@ -139,11 +139,14 @@ def generate_from_fm(
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
+    from evaluation.ref_clip import make_prev_expr_init
+
     best_raw = None
     best_l1 = float("inf")
     with torch.no_grad():
         for k in range(max(n_samples, 1)):
-            prev_expr = torch.zeros(1, P, D, device=device)
+            # Match training-time prev_expr init (raw zero, then normalize → -mean/std).
+            prev_expr = make_prev_expr_init(P, D, expr_mean, expr_std, device)
             chunks = []
             for t in range(0, T, W):
                 chunk_len = min(W, T - t)
