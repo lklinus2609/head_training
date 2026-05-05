@@ -201,6 +201,27 @@ class FMConfig:
     # Best-of-K stochastic ref-clip evaluation. 0 or 1 → single-sample metric;
     # >1 → report min over K samples (fair comparison vs deterministic baseline).
     eval_n_samples: int = 4
+    # Auxiliary x̂_1-reconstruction losses ported from Stage 2. Applied to
+    # x̂_1 = x_t + (1-t)·u_pred (single-step FM reconstruction) against the GT
+    # window x_1. Gradient through u_pred scales with (1-t), so high-t
+    # contributions are naturally suppressed without an explicit cutoff.
+    # All default 0 → trainer falls back to the canonical pure-FM recipe.
+    #
+    # lambda_vel  : per-dim L1 on Δx̂_1 vs Δx_1 — punishes damped motion magnitude.
+    # lambda_accel: per-dim L1 on Δ²x̂_1  vs Δ²x_1 — punishes jitter.
+    # lambda_spec : per-dim L1 on |FFT(x̂_1)| vs |FFT(x_1)| — punishes missing
+    #               high-frequency motion (lip closures, fast jaw, blinks).
+    # lambda_cov  : L1 on per-sample cross-dim covariance — punishes loss of
+    #               jaw/lip co-movement coordination.
+    # lambda_var  : per-dim std matching, with optional warmup + linear decay
+    #               (mirrors Stage 2's lambda_var schedule).
+    lambda_vel: float = 0.0
+    lambda_accel: float = 0.0
+    lambda_spec: float = 0.0
+    lambda_cov: float = 0.0
+    lambda_var: float = 0.0
+    lambda_var_warmup_epochs: int = 0
+    lambda_var_decay_epochs: int = 0
 
 
 @dataclass

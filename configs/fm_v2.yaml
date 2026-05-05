@@ -1,0 +1,59 @@
+_base_: base.yaml
+
+# Track B v2: flow matching with Stage 2 anti-dullness losses ported in.
+# Same FM objective + architecture as configs/fm.yaml. Adds five auxiliary
+# losses on the single-step x̂_1 reconstruction (x_t + (1-t)·u_pred) to
+# break the conditional-median plateau that pure FM-MSE produces:
+#
+#   lambda_vel  : per-dim L1 on Δx̂_1 vs Δx_1 — directly punishes damped
+#                 motion magnitude. Primary lever for lip-sync amplitude.
+#   lambda_spec : per-dim L1 on |FFT(x̂_1)| vs |FFT(x_1)| — pressures
+#                 high-frequency motion (lip closures, fast jaw, blinks)
+#                 that time-domain MSE under-weights.
+#   lambda_var  : per-dim std matching, warmup-then-decay schedule — keeps
+#                 per-dim amplitude calibrated where vel/spec leave gaps.
+#   lambda_accel: per-dim L1 on Δ²x̂_1 vs Δ²x_1 — jitter control. Smaller
+#                 than Stage 2's 0.25 because FM's x̂_1 reconstruction is
+#                 noisier than a teacher-forced AR prediction.
+#   lambda_cov  : L1 on per-sample cross-dim covariance — restores
+#                 jaw/lip co-movement coordination.
+#
+# All weights start at ~0.5x of Stage 2's canonical values. The x̂_1
+# reconstruction is noisier than Stage 2's clean teacher-forced pred, so
+# the aux gradient is correspondingly noisier. Tune up after first curve
+# if val_ref_std_ratio_mouth still reads <1.
+#
+# Also flips two quick wins: logit_normal time sampling (concentrates
+# training on mid-t where the velocity field is hardest) and a higher
+# cosine LR floor (the canonical 0.1 collapsed too aggressively — best
+# epoch was hitting ~75 with no further improvement past that).
+fm:
+  epochs: 120
+  batch_size: 128
+  lr: 1.0e-4
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 1.0e-5
+  grad_clip: 1.0
+  window_size: 30
+  t_sampling: "logit_normal"
+  nfe_inference: 4
+  time_embed_dim: 64
+  val_every: 1
+  save_every: 5
+  patience: 15
+  seed: 42
+  use_cosine_lr: true
+  cosine_lr_min_ratio: 0.3
+  eval_n_samples: 8
+  # Stage 2 ports — magnitude-governing first.
+  lambda_vel: 0.25
+  lambda_spec: 0.25
+  lambda_var: 0.05
+  lambda_var_warmup_epochs: 40
+  lambda_var_decay_epochs: 40
+  lambda_accel: 0.10
+  lambda_cov: 0.10
+
+stage2:
+  ref_clip_audio_path: "$WORK/data/beat2_raw/beat_english_v2.0.0/wave16k/2_scott_0_8_8.wav"

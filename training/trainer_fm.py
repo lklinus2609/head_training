@@ -21,6 +21,13 @@ from evaluation.ref_clip import (
     fm_slide_inference,
     prepare_ref_clip,
 )
+from training.losses import (
+    acceleration_loss,
+    covariance_loss,
+    spectral_loss,
+    variance_matching_loss,
+    velocity_loss,
+)
 from utils.checkpoint import checkpoint_path, save_checkpoint
 from utils.ddp import is_main_process
 from utils.logging_utils import log_metrics
@@ -64,6 +71,25 @@ class FMTrainer:
             return torch.sigmoid(torch.randn(batch_size, device=self.device))
         return torch.rand(batch_size, device=self.device)
 
+    def _effective_lambda_var(self, epoch: int | None) -> float:
+        """Mirror of Stage 2's lambda_var schedule for the FM track.
+
+        epoch=None → no schedule (use raw lambda_var). Used in validate()
+        where we just want a stable component value for logging.
+        """
+        lv = self.config.fm.lambda_var
+        if lv == 0.0 or epoch is None:
+            return lv
+        w = self.config.fm.lambda_var_warmup_epochs
+        d = self.config.fm.lambda_var_decay_epochs
+        if epoch < w:
+            return lv
+        if d > 0 and epoch < w + d:
+            return lv * (1.0 - (epoch - w) / d)
+        if d > 0:
+            return 0.0
+        return lv
+
     def _extract_window(self, expression, audio, prev_expr, start: int):
         """Slice a training batch to a single `window_size`-frame sub-window.
 
@@ -85,12 +111,24 @@ class FMTrainer:
             prev_win = full_expr[:, start:start + P]
         return x_1, audio_win, prev_win
 
-    def _fm_loss(self, x_1, audio, emotion, prev):
+    def _fm_loss(self, x_1, audio, emotion, prev, epoch: int | None = None):
         """Rectified-flow loss: MSE(u_pred, x_1 - x_0) on x_t = (1-t)x_0 + t x_1.
 
         Loss is optionally per-dim-std weighted to match the transformer track's
         dim-weighted L1 (so dims with larger natural range contribute more, in
         line with the perceptual-importance weighting used elsewhere).
+
+        Optional auxiliary x̂_1-reconstruction losses (ported from Stage 2)
+        attack the conditional-median plateau where pure FM-MSE damps motion
+        magnitude. Each is gated on its lambda > 0; default 0 preserves the
+        canonical pure-FM recipe. Reconstructed x̂_1 = x_t + (1-t)·u_pred —
+        gradient through u_pred scales with (1-t), so high-t samples
+        contribute less, which is desirable (high-t reconstruction is
+        dominated by x_t ≈ x_1 and carries little signal).
+
+        Returns:
+            (total, components): total is the scalar loss for backprop.
+            components is a dict of named scalar tensors for logging.
         """
         B = x_1.shape[0]
         x_0 = torch.randn_like(x_1)
@@ -99,10 +137,56 @@ class FMTrainer:
         x_t = (1.0 - t_bhw) * x_0 + t_bhw * x_1
         u_target = x_1 - x_0
         u_pred = self.generator(x_t, t, audio, emotion, prev)
+
+        # Primary FM loss: dim-weighted MSE on the velocity field.
         sq = (u_pred - u_target) ** 2  # [B, W, D]
         if self.dim_weights is not None:
             sq = sq * self.dim_weights
-        return sq.mean()
+        fm = sq.mean()
+        components: dict[str, torch.Tensor] = {"fm": fm}
+        total = fm
+
+        cfg = self.config.fm
+        lambda_var_eff = self._effective_lambda_var(epoch)
+        any_aux = (
+            cfg.lambda_vel > 0.0 or cfg.lambda_accel > 0.0
+            or cfg.lambda_spec > 0.0 or cfg.lambda_cov > 0.0
+            or lambda_var_eff > 0.0
+        )
+        if not any_aux:
+            return total, components
+
+        # Single-step x̂_1 reconstruction. At convergence (u_pred → x_1 - x_0)
+        # this collapses to x_1, so all aux losses → 0 in the limit. Early in
+        # training they provide an extra gradient signal toward motion content.
+        x1_hat = x_t + (1.0 - t_bhw) * u_pred
+
+        if cfg.lambda_vel > 0.0:
+            vel = velocity_loss(x1_hat, x_1, self.dim_weights)
+            components["vel"] = vel
+            total = total + cfg.lambda_vel * vel
+
+        if cfg.lambda_accel > 0.0:
+            accel = acceleration_loss(x1_hat, x_1, self.dim_weights)
+            components["accel"] = accel
+            total = total + cfg.lambda_accel * accel
+
+        if cfg.lambda_spec > 0.0:
+            spec = spectral_loss(x1_hat, x_1, self.dim_weights)
+            components["spec"] = spec
+            total = total + cfg.lambda_spec * spec
+
+        if cfg.lambda_cov > 0.0:
+            cov = covariance_loss(x1_hat, x_1)
+            components["cov"] = cov
+            total = total + cfg.lambda_cov * cov
+
+        if lambda_var_eff > 0.0:
+            var = variance_matching_loss(x1_hat, x_1)
+            components["var"] = var
+            total = total + lambda_var_eff * var
+
+        return total, components
 
     def train_epoch(self, epoch: int) -> float:
         self.generator.train()
@@ -124,7 +208,7 @@ class FMTrainer:
             start = int(torch.randint(0, max(T - W + 1, 1), (1,)).item())
             x_1, audio_win, prev_win = self._extract_window(expression, audio, prev_expr, start)
 
-            loss = self._fm_loss(x_1, audio_win, emotion, prev_win)
+            loss, components = self._fm_loss(x_1, audio_win, emotion, prev_win, epoch=epoch)
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -138,17 +222,20 @@ class FMTrainer:
             self.global_step += 1
 
             if is_main_process():
-                pbar.set_postfix(loss=f"{loss.item():.4f}", start=start)
+                postfix = {"loss": f"{loss.item():.4f}", "start": start}
+                if "fm" in components:
+                    postfix["fm"] = f"{components['fm'].item():.4f}"
+                pbar.set_postfix(**postfix)
                 if self.global_step % 50 == 0:
-                    log_metrics(
-                        {
-                            "fm/train_loss": loss.item(),
-                            "fm/lr": self.optimizer.param_groups[0]["lr"],
-                            "fm/window_start": start,
-                        },
-                        step=self.global_step,
-                        run=self.wandb_run,
-                    )
+                    metrics = {
+                        "fm/train_loss": loss.item(),
+                        "fm/lr": self.optimizer.param_groups[0]["lr"],
+                        "fm/window_start": start,
+                        "fm/lambda_var_eff": self._effective_lambda_var(epoch),
+                    }
+                    for name, val in components.items():
+                        metrics[f"fm/train_{name}"] = val.item()
+                    log_metrics(metrics, step=self.global_step, run=self.wandb_run)
 
         return total_loss / max(num_batches, 1)
 
@@ -157,6 +244,9 @@ class FMTrainer:
         """Val: FM loss on held-out sub-windows + best-of-K ref-clip eval."""
         self.generator.eval()
         total_loss = 0.0
+        # Per-component running totals so the wandb val curves stay informative
+        # when aux losses are enabled. Keys are added on first observation.
+        comp_totals: dict[str, float] = {}
         num_batches = 0
 
         T = self.config.data.seq_len
@@ -171,20 +261,25 @@ class FMTrainer:
             # Deterministic validation offset (not a random choice — fair across epochs).
             start = 0
             x_1, audio_win, prev_win = self._extract_window(expression, audio, prev_expr, start)
-            loss = self._fm_loss(x_1, audio_win, emotion, prev_win)
+            # epoch=None → no warmup/decay applied to lambda_var; we want a
+            # stable val signal not affected by the schedule.
+            loss, components = self._fm_loss(x_1, audio_win, emotion, prev_win, epoch=None)
 
             total_loss += loss.item()
+            for name, val in components.items():
+                comp_totals[name] = comp_totals.get(name, 0.0) + val.item()
             num_batches += 1
 
         avg_loss = total_loss / max(num_batches, 1)
+        avg_components = {k: v / max(num_batches, 1) for k, v in comp_totals.items()}
 
         if is_main_process():
-            log_metrics(
-                {"fm/val_loss": avg_loss, "fm/epoch": epoch},
-                step=self.global_step,
-                run=self.wandb_run,
-            )
-            print(f"  Val FM Loss: {avg_loss:.4f}")
+            metrics = {"fm/val_loss": avg_loss, "fm/epoch": epoch}
+            for name, val in avg_components.items():
+                metrics[f"fm/val_{name}"] = val
+            log_metrics(metrics, step=self.global_step, run=self.wandb_run)
+            comp_str = " ".join(f"{k}={v:.4f}" for k, v in avg_components.items())
+            print(f"  Val FM Loss: {avg_loss:.4f} ({comp_str})")
 
         if self.ref_clip is not None:
             K = max(self.config.fm.eval_n_samples, 1)
